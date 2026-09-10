@@ -146,7 +146,7 @@ private:
     void operator()(TTEntry *p) const noexcept { std::free(p); }
   };
 
-  const CppSearchConfig &config_;
+  const CppSearchConfig config_;
   std::unique_ptr<TTEntry[], FreeDeleter> table_;
   size_t capacity_ = 0;
   size_t mask_ = 0;

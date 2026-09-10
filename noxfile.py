@@ -141,6 +141,11 @@ def benchmarks(session: Session) -> None:
         "--benchmark-autosave",
         "tests/benchmarks",
     )
+    session.run(
+        "python",
+        "-c",
+        "from tests.benchmarks.anchor import normalize_benchmark_json; normalize_benchmark_json('output.json')",
+    )
 
 
 @nox.session(tags=["heavy"])

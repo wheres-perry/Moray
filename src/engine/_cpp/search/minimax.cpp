@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace search {
@@ -19,10 +20,22 @@ constexpr double POS_INF = std::numeric_limits<double>::infinity();
 } // namespace
 
 Minimax::Minimax(Board &board, evaluators::IEvaluator &evaluator,
-                 TranspositionTable *tt, MoveSorter *sorter, Zobrist *zobrist,
-                 const CppSearchConfig &config) noexcept
+                 TranspositionTable *tt, MoveSorter *sorter,
+                 StaticExchangeEvaluator *see, Zobrist *zobrist,
+                 const CppSearchConfig &config)
     : board_(board), evaluator_(evaluator), tt_(tt), move_sorter_(sorter),
-      zobrist_(zobrist), config_(config) {}
+      see_(see), zobrist_(zobrist), plan_(SearchPlan::compile(config)) {
+  if (plan_.services.tt != (tt_ != nullptr) ||
+      plan_.services.zobrist != (zobrist_ != nullptr) ||
+      plan_.services.move_sorter != (move_sorter_ != nullptr) ||
+      plan_.services.see != (see_ != nullptr)) {
+    throw std::invalid_argument(
+        "Runtime services do not match the resolved search plan");
+  }
+  if (move_sorter_ != nullptr) {
+    move_sorter_->set_telemetry(&stats_.feature_telemetry);
+  }
+}
 
 void Minimax::reset_state(bool clear_tt, bool clear_history,
                           bool clear_killers) noexcept {
@@ -42,27 +55,57 @@ void Minimax::reset_clock() noexcept {
 }
 
 bool Minimax::check_time_limit() noexcept {
-  if (!config_.max_time.has_value() || !start_time_.has_value()) {
+  if (!active_max_time_.has_value() || !start_time_.has_value()) {
     return false;
   }
   const auto elapsed =
       std::chrono::duration<double>(Clock::now() - *start_time_);
-  if (elapsed.count() >= *config_.max_time) {
+  if (elapsed.count() >= *active_max_time_) {
     time_up_ = true;
     return true;
   }
   return false;
 }
 
-Minimax::Result Minimax::find_best_move(int depth) {
-  const int target_depth = std::max(1, depth);
+Minimax::Result
+Minimax::find_best_move(int depth, std::optional<double> max_time_override) {
+  if (depth < 1 || depth > 128) {
+    throw std::invalid_argument("Search depth must be between 1 and 128");
+  }
+  if (max_time_override.has_value() && !is_finite_number(*max_time_override)) {
+    throw std::invalid_argument(
+        "Search max_time override must be finite and positive");
+  }
+  if (max_time_override.has_value() && *max_time_override <= 0.0) {
+    throw std::invalid_argument(
+        "Search max_time override must be finite and positive");
+  }
+  int target_depth = depth;
+  if (plan_.general.max_depth.has_value()) {
+    target_depth = std::min(target_depth, *plan_.general.max_depth);
+  }
   stats_.reset();
+  if (move_sorter_ != nullptr) {
+    move_sorter_->set_telemetry(&stats_.feature_telemetry);
+  }
   time_up_ = false;
+  active_max_time_ = max_time_override.has_value() ? max_time_override
+                                                   : plan_.general.max_time;
   start_time_ = Clock::now();
   root_best_move_.reset();
 
   if (tt_ != nullptr) {
+    auto &tt_stats = telemetry(SearchFeature::TRANSPOSITION_TABLE);
+    tt_stats.considered += 1;
+    tt_stats.eligible += 1;
+    tt_stats.applied += 1;
     tt_->increment_age();
+    if (plan_.state.tt_aging) {
+      auto &age_stats = telemetry(SearchFeature::TT_AGING);
+      age_stats.considered += 1;
+      age_stats.eligible += 1;
+      age_stats.applied += 1;
+    }
   }
   if (zobrist_ != nullptr) {
     (void)zobrist_->hash_board(board_);
@@ -79,12 +122,17 @@ Minimax::Result Minimax::find_best_move(int depth) {
 
     double alpha = NEG_INF;
     double beta = POS_INF;
-    if (config_.use_alpha_beta && config_.use_aspiration_windows &&
-        previous_score.has_value()) {
-      const double margin =
-          static_cast<double>(std::max(10, config_.aspiration_window_margin));
-      alpha = *previous_score - margin;
-      beta = *previous_score + margin;
+    if (plan_.state.aspiration) {
+      auto &aspiration_stats = telemetry(SearchFeature::ASPIRATION_WINDOWS);
+      aspiration_stats.considered += 1;
+      if (previous_score.has_value()) {
+        aspiration_stats.eligible += 1;
+        aspiration_stats.applied += 1;
+        const double margin =
+            static_cast<double>(std::max(10, plan_.state.aspiration_margin));
+        alpha = *previous_score - margin;
+        beta = *previous_score + margin;
+      }
     }
 
     const double relative_score =
@@ -133,40 +181,42 @@ Minimax::Result Minimax::find_best_move(int depth) {
 }
 
 double Minimax::search_with_window(int depth, double alpha, double beta) {
-  const bool use_aspiration = config_.use_alpha_beta &&
-                              config_.use_aspiration_windows &&
-                              is_finite(alpha) && is_finite(beta);
+  const bool use_aspiration = plan_.algorithm.alpha_beta &&
+                              plan_.state.aspiration && is_finite(alpha) &&
+                              is_finite(beta);
 
   if (!use_aspiration) {
-    const double a = config_.use_alpha_beta ? alpha : NEG_INF;
-    const double b = config_.use_alpha_beta ? beta : POS_INF;
-    return negamax(depth, a, b, 0, std::nullopt, config_.max_check_extensions);
+    const double a = plan_.algorithm.alpha_beta ? alpha : NEG_INF;
+    const double b = plan_.algorithm.alpha_beta ? beta : POS_INF;
+    return negamax(depth, a, b, 0, std::nullopt,
+                   plan_.state.max_check_extensions);
   }
 
   double current_alpha = alpha;
   double current_beta = beta;
 
   for (int attempt = 0; attempt < 6; ++attempt) {
-    const double score = negamax(depth, current_alpha, current_beta, 0,
-                                 std::nullopt, config_.max_check_extensions);
+    const double score =
+        negamax(depth, current_alpha, current_beta, 0, std::nullopt,
+                plan_.state.max_check_extensions);
     if (time_up_) {
       return score;
     }
     if (score <= current_alpha) {
       current_alpha -=
-          static_cast<double>(std::max(50, config_.aspiration_window_margin));
+          static_cast<double>(std::max(50, plan_.state.aspiration_margin));
       continue;
     }
     if (score >= current_beta) {
       current_beta +=
-          static_cast<double>(std::max(50, config_.aspiration_window_margin));
+          static_cast<double>(std::max(50, plan_.state.aspiration_margin));
       continue;
     }
     return score;
   }
 
   return negamax(depth, NEG_INF, POS_INF, 0, std::nullopt,
-                 config_.max_check_extensions);
+                 plan_.state.max_check_extensions);
 }
 
 double Minimax::negamax(int depth, double alpha, double beta, int ply,
@@ -187,29 +237,42 @@ double Minimax::negamax(int depth, double alpha, double beta, int ply,
   }
 
   if (depth <= 0) {
-    if (config_.use_quiescence_search) {
+    if (plan_.algorithm.quiescence) {
+      auto &qs_stats = telemetry(SearchFeature::QUIESCENCE_SEARCH);
+      qs_stats.considered += 1;
+      qs_stats.eligible += 1;
+      qs_stats.applied += 1;
       return quiescence(alpha, beta, ply, 0);
     }
     return relative_eval();
   }
 
   bool in_check = board_.is_check();
-  if (config_.use_check_extensions && in_check && extensions_left > 0 &&
-      config_.use_alpha_beta) {
-    depth += 1;
-    extensions_left -= 1;
-    stats_.check_extensions += 1;
+  if (plan_.state.check_extensions) {
+    auto &extension_stats = telemetry(SearchFeature::CHECK_EXTENSIONS);
+    extension_stats.considered += 1;
+    if (in_check && extensions_left > 0) {
+      extension_stats.eligible += 1;
+      extension_stats.applied += 1;
+      depth += 1;
+      extensions_left -= 1;
+      stats_.check_extensions += 1;
+    }
   }
 
   const auto key_opt = current_hash();
   std::optional<Move> hash_move;
   if (tt_ != nullptr && key_opt.has_value()) {
+    auto &tt_stats = telemetry(SearchFeature::TRANSPOSITION_TABLE);
+    tt_stats.considered += 1;
+    tt_stats.eligible += 1;
     TTEntry *entry = tt_->probe(*key_opt);
     if (entry != nullptr) {
+      tt_stats.applied += 1;
       if (entry->has_best_move) {
         hash_move = entry->best_move;
       }
-      if (config_.use_alpha_beta) {
+      if (plan_.algorithm.alpha_beta) {
         auto hit_score = tt_->try_get_score(*entry, depth, alpha, beta);
         if (hit_score.has_value()) {
           if (ply == 0) {
@@ -222,6 +285,7 @@ double Minimax::negamax(int depth, double alpha, double beta, int ply,
             // root_best_move_ is populated.
           } else {
             stats_.tt_hits += 1;
+            tt_stats.cutoffs += 1;
             return *hit_score;
           }
         }
@@ -234,6 +298,7 @@ double Minimax::negamax(int depth, double alpha, double beta, int ply,
           }
         } else {
           stats_.tt_hits += 1;
+          tt_stats.cutoffs += 1;
           return entry->score;
         }
       }
@@ -242,36 +307,53 @@ double Minimax::negamax(int depth, double alpha, double beta, int ply,
 
   const double static_eval = relative_eval();
 
-  if (config_.use_alpha_beta && config_.use_reverse_futility_pruning &&
-      !in_check && depth <= config_.rfp_max_depth && beta < POS_INF) {
-    const double margin =
-        static_cast<double>(config_.rfp_margin_multiplier * depth);
-    if (static_eval - margin >= beta) {
-      return beta;
+  if (plan_.pruning.reverse_futility) {
+    auto &rfp_stats = telemetry(SearchFeature::REVERSE_FUTILITY_PRUNING);
+    rfp_stats.considered += 1;
+    if (!in_check && depth <= plan_.pruning.rfp_max_depth && beta < POS_INF) {
+      rfp_stats.eligible += 1;
+      const double margin =
+          static_cast<double>(plan_.pruning.rfp_margin_multiplier * depth);
+      if (static_eval - margin >= beta) {
+        rfp_stats.applied += 1;
+        rfp_stats.cutoffs += 1;
+        return beta;
+      }
     }
   }
 
-  if (config_.use_alpha_beta && config_.use_null_move_pruning && !in_check &&
-      depth >= config_.nmp_min_depth && has_non_pawn_material() &&
-      beta < POS_INF) {
-    const double null_score =
-        null_move_search(depth, beta, ply, extensions_left);
-    if (null_score >= beta) {
-      stats_.null_move_cuts += 1;
-      return beta;
+  if (plan_.pruning.null_move) {
+    auto &null_stats = telemetry(SearchFeature::NULL_MOVE_PRUNING);
+    null_stats.considered += 1;
+    if (!in_check && depth >= plan_.pruning.nmp_min_depth &&
+        has_non_pawn_material() && beta < POS_INF) {
+      null_stats.eligible += 1;
+      null_stats.applied += 1;
+      const double null_score =
+          null_move_search(depth, beta, ply, extensions_left);
+      if (null_score >= beta) {
+        null_stats.cutoffs += 1;
+        stats_.null_move_cuts += 1;
+        return beta;
+      }
     }
   }
 
-  if (config_.use_iid && config_.use_alpha_beta &&
-      depth >= config_.iid_min_depth && !hash_move.has_value() &&
-      tt_ != nullptr && key_opt.has_value()) {
-    stats_.iid_searches += 1;
-    const int shallow_depth = std::max(1, depth - config_.iid_depth_reduction);
-    (void)negamax(shallow_depth, alpha, beta, ply, previous_move,
-                  extensions_left);
-    TTEntry *iid_entry = tt_->probe(*key_opt);
-    if (iid_entry != nullptr && iid_entry->has_best_move) {
-      hash_move = iid_entry->best_move;
+  if (plan_.algorithm.iid) {
+    auto &iid_stats = telemetry(SearchFeature::IID);
+    iid_stats.considered += 1;
+    if (depth >= plan_.algorithm.iid_min_depth && !hash_move.has_value() &&
+        tt_ != nullptr && key_opt.has_value()) {
+      iid_stats.eligible += 1;
+      iid_stats.applied += 1;
+      stats_.iid_searches += 1;
+      const int shallow_depth = depth - plan_.algorithm.iid_depth_reduction;
+      (void)negamax(shallow_depth, alpha, beta, ply, previous_move,
+                    extensions_left);
+      TTEntry *iid_entry = tt_->probe(*key_opt);
+      if (iid_entry != nullptr && iid_entry->has_best_move) {
+        hash_move = iid_entry->best_move;
+      }
     }
   }
 
@@ -280,7 +362,7 @@ double Minimax::negamax(int depth, double alpha, double beta, int ply,
     return in_check ? -MATE_SCORE + ply : 0.0;
   }
 
-  if (move_sorter_ != nullptr) {
+  if (plan_.ordering.enabled) {
     legal_moves = move_sorter_->sort_moves(board_, legal_moves, ply, hash_move,
                                            previous_move);
   }
@@ -296,7 +378,34 @@ double Minimax::negamax(int depth, double alpha, double beta, int ply,
 
     const Move &move = legal_moves[index];
     const bool is_tactical = is_tactical_move(move);
-    if (can_apply_futility(depth, static_eval, alpha, in_check, is_tactical)) {
+    bool prune_move = false;
+    if (plan_.pruning.futility) {
+      auto &futility_stats = telemetry(SearchFeature::FUTILITY_PRUNING);
+      futility_stats.considered += 1;
+      if (depth == 1 && !in_check && !is_tactical) {
+        futility_stats.eligible += 1;
+        if (static_eval + static_cast<double>(plan_.pruning.futility_margin) <=
+            alpha) {
+          futility_stats.applied += 1;
+          prune_move = true;
+        }
+      }
+    }
+    if (!prune_move && plan_.pruning.extended_futility) {
+      auto &futility_stats =
+          telemetry(SearchFeature::EXTENDED_FUTILITY_PRUNING);
+      futility_stats.considered += 1;
+      if (depth == 2 && !in_check && !is_tactical) {
+        futility_stats.eligible += 1;
+        if (static_eval +
+                static_cast<double>(plan_.pruning.extended_futility_margin) <=
+            alpha) {
+          futility_stats.applied += 1;
+          prune_move = true;
+        }
+      }
+    }
+    if (prune_move) {
       continue;
     }
 
@@ -305,11 +414,16 @@ double Minimax::negamax(int depth, double alpha, double beta, int ply,
 
     int child_extensions = extensions_left;
     int next_depth = depth - 1;
-    if (config_.use_check_extensions && gives_check && child_extensions > 0 &&
-        config_.use_alpha_beta) {
-      next_depth += 1;
-      child_extensions -= 1;
-      stats_.check_extensions += 1;
+    if (plan_.state.check_extensions) {
+      auto &extension_stats = telemetry(SearchFeature::CHECK_EXTENSIONS);
+      extension_stats.considered += 1;
+      if (gives_check && child_extensions > 0) {
+        extension_stats.eligible += 1;
+        extension_stats.applied += 1;
+        next_depth += 1;
+        child_extensions -= 1;
+        stats_.check_extensions += 1;
+      }
     }
 
     const double score = search_child(
@@ -329,27 +443,38 @@ double Minimax::negamax(int depth, double alpha, double beta, int ply,
       }
     }
 
-    if (config_.use_alpha_beta) {
+    if (plan_.algorithm.alpha_beta) {
+      auto &ab_stats = telemetry(SearchFeature::ALPHA_BETA);
+      ab_stats.considered += 1;
+      ab_stats.eligible += 1;
+      ab_stats.applied += 1;
       alpha = std::max(alpha, score);
       if (alpha >= beta) {
+        ab_stats.cutoffs += 1;
         stats_.beta_cutoffs += 1;
         if (index == 0) {
           stats_.first_move_cuts += 1;
         }
         if (move_sorter_ != nullptr) {
-          if (config_.use_killer_moves && move_sorter_->is_killer(ply, move)) {
+          if (plan_.ordering.killers && move_sorter_->is_killer(ply, move)) {
             stats_.killer_cuts += 1;
+            telemetry(SearchFeature::KILLER_MOVES).cutoffs += 1;
           }
-          if (config_.use_history_heuristic &&
+          if (plan_.ordering.history &&
               move_sorter_->history_get(move.from, move.to, move.promotion) >
                   0) {
             stats_.history_cuts += 1;
+            telemetry(SearchFeature::HISTORY_HEURISTIC).cutoffs += 1;
           }
           move_sorter_->on_beta_cutoff(move, ply, depth, previous_move,
                                        is_tactical);
         }
         break;
       }
+    } else {
+      // Keep a best-so-far bound for selective policies such as LMR. It is
+      // never passed to children as an alpha-beta pruning window.
+      alpha = std::max(alpha, score);
     }
   }
 
@@ -369,36 +494,56 @@ double Minimax::search_child(int index, int next_depth, double alpha,
                              double beta, int ply, const Move &move,
                              bool in_check, bool gives_check, bool is_tactical,
                              int extensions_left) {
-  if (!config_.use_alpha_beta) {
-    return -negamax(next_depth, NEG_INF, POS_INF, ply + 1, move,
-                    extensions_left);
+  // Depth and window policies are composed independently. This supports all
+  // alpha-beta/PVS/LMR combinations instead of hiding one inside another.
+  const bool use_alpha_beta = plan_.algorithm.alpha_beta;
+  const bool zero_window = use_alpha_beta && plan_.algorithm.pvs && index > 0;
+  const bool reduced =
+      can_apply_lmr(index, next_depth, in_check, gives_check, is_tactical);
+
+  if (plan_.algorithm.pvs) {
+    auto &pvs_stats = telemetry(SearchFeature::PVS);
+    pvs_stats.considered += 1;
+    if (zero_window) {
+      pvs_stats.eligible += 1;
+      pvs_stats.applied += 1;
+    }
   }
 
-  if (config_.use_pvs && index > 0) {
-    double score = alpha + 1.0;
-    if (can_apply_lmr(index, next_depth, in_check, gives_check, is_tactical)) {
-      const int reduction = lmr_reduction(next_depth, index);
-      const int reduced_depth = std::max(0, next_depth - reduction);
-      score = -negamax(reduced_depth, -alpha - 1.0, -alpha, ply + 1, move,
-                       extensions_left);
-      if (score > alpha) {
-        stats_.lmr_researches += 1;
-      }
+  int initial_depth = next_depth;
+  if (plan_.pruning.lmr) {
+    auto &lmr_stats = telemetry(SearchFeature::LMR);
+    lmr_stats.considered += 1;
+    if (reduced) {
+      lmr_stats.eligible += 1;
+      lmr_stats.applied += 1;
+      initial_depth =
+          std::max(0, next_depth - lmr_reduction(next_depth, index));
     }
-
-    if (score > alpha) {
-      score = -negamax(next_depth, -alpha - 1.0, -alpha, ply + 1, move,
-                       extensions_left);
-      if (alpha < score && score < beta) {
-        stats_.pvs_researches += 1;
-        score =
-            -negamax(next_depth, -beta, -alpha, ply + 1, move, extensions_left);
-      }
-    }
-    return score;
   }
 
-  return -negamax(next_depth, -beta, -alpha, ply + 1, move, extensions_left);
+  const double initial_beta = zero_window ? alpha + 1.0 : beta;
+  const double child_alpha = use_alpha_beta ? -initial_beta : NEG_INF;
+  const double child_beta = use_alpha_beta ? -alpha : POS_INF;
+  double score = -negamax(initial_depth, child_alpha, child_beta, ply + 1, move,
+                          extensions_left);
+
+  if (reduced && score > alpha) {
+    auto &lmr_stats = telemetry(SearchFeature::LMR);
+    lmr_stats.researches += 1;
+    stats_.lmr_researches += 1;
+    score = -negamax(next_depth, child_alpha, child_beta, ply + 1, move,
+                     extensions_left);
+  }
+
+  if (zero_window && alpha < score && score < beta) {
+    auto &pvs_stats = telemetry(SearchFeature::PVS);
+    pvs_stats.researches += 1;
+    stats_.pvs_researches += 1;
+    score = -negamax(next_depth, -beta, -alpha, ply + 1, move, extensions_left);
+  }
+
+  return score;
 }
 
 double Minimax::quiescence(double alpha, double beta, int ply, int qs_depth) {
@@ -407,7 +552,7 @@ double Minimax::quiescence(double alpha, double beta, int ply, int qs_depth) {
     stats_.seldepth = ply;
   }
 
-  if (qs_depth >= config_.qs_max_depth) {
+  if (qs_depth >= plan_.algorithm.qs_max_depth) {
     return relative_eval();
   }
 
@@ -417,7 +562,7 @@ double Minimax::quiescence(double alpha, double beta, int ply, int qs_depth) {
   }
 
   const double stand_pat = relative_eval();
-  if (config_.use_alpha_beta) {
+  if (plan_.algorithm.alpha_beta) {
     if (stand_pat >= beta) {
       return beta;
     }
@@ -438,23 +583,34 @@ double Minimax::quiescence(double alpha, double beta, int ply, int qs_depth) {
     return alpha;
   }
 
-  if (move_sorter_ != nullptr) {
+  if (plan_.ordering.enabled) {
     tactical = move_sorter_->sort_tactical(board_, tactical);
   }
 
   for (const auto &move : tactical) {
-    if (config_.use_delta_pruning && config_.use_alpha_beta) {
+    if (plan_.pruning.delta) {
+      auto &delta_stats = telemetry(SearchFeature::DELTA_PRUNING);
+      delta_stats.considered += 1;
       const double delta_eval = stand_pat + capture_gain(move) +
-                                static_cast<double>(config_.delta_margin);
+                                static_cast<double>(plan_.pruning.delta_margin);
+      delta_stats.eligible += 1;
       if (delta_eval < alpha) {
+        delta_stats.applied += 1;
+        delta_stats.cutoffs += 1;
         stats_.qs_delta_pruning += 1;
         continue;
       }
     }
 
-    if (config_.use_see_pruning_in_qs && move_sorter_ != nullptr &&
-        board_.is_capture(move)) {
-      if (move_sorter_->see(board_, move) < 0) {
+    if (plan_.pruning.see_in_qs) {
+      auto &see_stats = telemetry(SearchFeature::SEE_PRUNING_IN_QS);
+      see_stats.considered += 1;
+      if (board_.is_capture(move)) {
+        see_stats.eligible += 1;
+      }
+      if (board_.is_capture(move) && see_->evaluate(board_, move) < 0) {
+        see_stats.applied += 1;
+        see_stats.cutoffs += 1;
         stats_.qs_see_pruning += 1;
         continue;
       }
@@ -464,7 +620,7 @@ double Minimax::quiescence(double alpha, double beta, int ply, int qs_depth) {
     const double score = -quiescence(-beta, -alpha, ply + 1, qs_depth + 1);
     pop_move_with_hash(saved_hash);
 
-    if (config_.use_alpha_beta && score >= beta) {
+    if (plan_.algorithm.alpha_beta && score >= beta) {
       return beta;
     }
     if (score > alpha) {
@@ -496,7 +652,7 @@ double Minimax::null_move_search(int depth, double beta, int ply,
     }
   }
 
-  const int reduction = std::max(1, config_.nmp_reduction_r);
+  const int reduction = plan_.pruning.nmp_reduction;
   const double score =
       -negamax(std::max(0, depth - 1 - reduction), -beta, -beta + 1.0, ply + 1,
                std::nullopt, extensions_left);

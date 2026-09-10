@@ -1,5 +1,6 @@
 """Configuration data structures for the chess engine."""
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -26,21 +27,7 @@ class SearchConfig:
         AGING = 1
 
     def __post_init__(self) -> None:
-        """Fast-fail on clearly broken dependency pairs."""
-        if self.use_pvs and not self.use_alpha_beta:
-            msg = "Principal Variation Search (PVS) requires alpha-beta pruning."
-            raise ValueError(msg)
-        if self.use_tt_aging and not self.use_transposition_table:
-            msg = "TT aging requires transposition table to be enabled."
-            raise ValueError(msg)
-        if self.use_killer_moves and not (
-            self.use_move_ordering and self.use_alpha_beta
-        ):
-            msg = (
-                "Killer heuristic requires both move ordering "
-                "and alpha-beta to be enabled."
-            )
-            raise ValueError(msg)
+        """Defer dependency validation to the canonical configuration solver."""
 
     # ========================================================================
     # Move Ordering
@@ -121,22 +108,19 @@ class EvaluationConfig:
 
     Components (each independently toggleable):
       - PST:            Piece-Square Tables
-      - Pawn Structure: Doubled / isolated / passed pawn analysis (requires PST)
+      - Pawn Structure: Doubled / isolated / passed pawn analysis
       - Mobility:       Piece mobility scoring
       - King Safety:    Pawn shield, open-file penalties, attack zone
     """
 
     use_pst: bool = True
-    use_pawn_structure: bool = True  # requires use_pst
+    use_pawn_structure: bool = True
     use_mobility: bool = True
     use_king_safety: bool = True
     game_stage_conscious: bool = True
 
     def __post_init__(self) -> None:
-        """Fast-fail on clearly broken evaluation dependency pairs."""
-        if self.use_pawn_structure and not self.use_pst:
-            msg = "Pawn structure evaluation requires Piece-Square Tables (PST)."
-            raise ValueError(msg)
+        """Defer dependency validation to the canonical configuration solver."""
 
 
 @dataclass
@@ -266,3 +250,103 @@ class EngineConfig:
         if parts:
             return f"Eval: [{', '.join(parts)}]"
         return "Eval: [Material]"
+
+
+@dataclass(frozen=True)
+class ResolvedSearchConfig:
+    """Immutable search configuration accepted by the solver."""
+
+    max_time: float | None
+    max_depth: int | None
+    use_move_ordering: bool
+    use_mvv_lva: bool
+    use_history_heuristic: bool
+    history_max_score: int
+    use_countermove_heuristic: bool
+    use_see_ordering: bool
+    see_capture_threshold: int
+    use_killer_moves: bool
+    killer_slots_per_ply: int
+    use_hash_move_ordering: bool
+    use_alpha_beta: bool
+    use_pvs: bool
+    use_quiescence_search: bool
+    qs_max_depth: int
+    use_iid: bool
+    iid_min_depth: int
+    iid_depth_reduction: int
+    use_null_move_pruning: bool
+    nmp_reduction_r: int
+    nmp_min_depth: int
+    use_lmr: bool
+    lmr_min_depth: int
+    lmr_min_move_number: int
+    use_futility_pruning: bool
+    futility_margin_standard: int
+    use_extended_futility_pruning: bool
+    futility_margin_extended: int
+    use_reverse_futility_pruning: bool
+    rfp_margin_multiplier: int
+    rfp_max_depth: int
+    use_delta_pruning: bool
+    delta_margin: int
+    use_see_pruning_in_qs: bool
+    use_aspiration_windows: bool
+    aspiration_window_margin: int
+    use_check_extensions: bool
+    max_check_extensions: int
+    use_transposition_table: bool
+    tt_size_mb: int
+    use_tt_aging: bool
+
+    @classmethod
+    def from_config(cls, config: SearchConfig) -> "ResolvedSearchConfig":
+        """Snapshot a validated mutable search configuration."""
+        values = asdict(config)
+        if values["max_time"] is not None:
+            values["max_time"] = float(values["max_time"])
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class ResolvedEvaluationConfig:
+    """Immutable evaluation configuration accepted by the solver."""
+
+    use_pst: bool
+    use_pawn_structure: bool
+    use_mobility: bool
+    use_king_safety: bool
+    game_stage_conscious: bool
+
+    @classmethod
+    def from_config(cls, config: EvaluationConfig) -> "ResolvedEvaluationConfig":
+        """Snapshot a validated mutable evaluation configuration."""
+        return cls(**asdict(config))
+
+
+@dataclass(frozen=True)
+class ResolvedEngineConfig:
+    """Immutable, validated configuration consumed by runtime objects."""
+
+    search: ResolvedSearchConfig
+    evaluation: ResolvedEvaluationConfig
+    search_depth: int
+
+    @classmethod
+    def from_config(cls, config: EngineConfig) -> "ResolvedEngineConfig":
+        """Snapshot a validated mutable engine configuration."""
+        return cls(
+            search=ResolvedSearchConfig.from_config(config.search),
+            evaluation=ResolvedEvaluationConfig.from_config(config.evaluation),
+            search_depth=config.search_depth,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a serializable representation of the applied configuration."""
+        return asdict(self)
+
+    @property
+    def fingerprint(self) -> str:
+        """Return a stable identifier suitable for experiment result records."""
+        payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

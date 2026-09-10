@@ -289,17 +289,89 @@ uv run python scripts/bench_zobrist.py
 - Config validates dependencies on construction (`__post_init__`). For example, `use_pvs=True` requires `use_alpha_beta=True`, `use_killer_moves=True` requires `use_move_ordering=True`, etc.
 - `ConfigSolver` performs a comprehensive validation pass (driven by `ConfigSolverRules`) before the engine is constructed, raising `ConfigSolverError` on violations.
 
-### Supported Feature Matrix
+### Supported Configuration Matrix
+
+Canonical inventory of evaluator and search feature surfaces. Any config used in
+`configs/` or tests must map to a **Supported** row. The `Depends on` column lists
+hard prerequisites — these are the entries that belong in a single config registry so
+validation and normalisation can be derived from one source of truth instead of being
+hand-maintained in `ConfigSolverRules`.
+
+Status legend: **Supported** = implemented today · **Planned** = on the roadmap ·
+**Proposed** = candidate, not yet scheduled.
+
+#### 1. Evaluation backends (exactly one active)
+
+The evaluator is a single swappable backend. Component flags in §2 apply only to the
+`classic` / `psqt_tapered` backends; `piece_count`, `random_piece`, and the NNUE
+backends replace the hand-crafted sum entirely. See `docs/EVALUATION_PLAN.md` for the
+full compositional rules (which options are mutually exclusive vs. stackable).
+
+| Backend | Config key(s) | Depends on | Cost / node | Incremental | Status |
+| --- | --- | --- | --- | --- | --- |
+| Classic hand-crafted | `evaluation.backend=classic` + §2 | — | low–medium | optional | Supported |
+| Piece count (baseline) | `evaluation.backend=piece_count`, `piece_count_weight` | — | very low | no | Proposed |
+| Random piece (baseline) | `evaluation.backend=random_piece`, `random_seed` | — | very low | no | Proposed |
+| Tapered PSQT (PeSTO) | `evaluation.backend=psqt_tapered` | `pst_source`, `game_stage_conscious` | low | yes | Planned |
+| Stockfish NNUE | `evaluation.backend=nnue_stockfish`, `nnue_path` | SF-format network loader, incremental accumulator | low | required | Proposed |
+| Custom NNUE | `evaluation.backend=nnue_custom`, `nnue_path` | own architecture + training pipeline, incremental accumulator | low | required | Proposed |
+
+`material` is the degenerate `classic` case (all components off). `classic` is what
+`EvaluatorFactory` builds today. NNUE inference must run in C++ — a per-node Python or
+Torch call is not viable inside negamax.
+
+PST table source is a sub-option of the hand-crafted backends, mutually exclusive:
+`evaluation.pst_source = handcrafted | stockfish_distilled | pesto`. See
+`docs/EVALUATION_PLAN.md` §4 for the distillation method and §9 for code vs. network
+licensing (Stockfish code is GPL-3.0; its NNUE networks are CC0-1.0).
+
+#### 2. Hand-crafted evaluation components (classic backend)
+
+| Component | Config key | Depends on | Cost / node | Status |
+| --- | --- | --- | --- | --- |
+| Material | *(always on)* | — | very low | Supported |
+| Piece-Square Tables (mg/eg) | `evaluation.use_pst` | — | low | Supported |
+| Pawn structure | `evaluation.use_pawn_structure` | `use_pst` | medium | Supported |
+| Mobility | `evaluation.use_mobility` | — | medium | Supported |
+| King safety | `evaluation.use_king_safety` | — | medium | Supported |
+| Game-stage interpolation | `evaluation.game_stage_conscious` | any phase-aware component | low | Supported |
+| Bishop pair | `evaluation.use_bishop_pair` | — | very low | Proposed |
+| Rook on open/semi-open file | `evaluation.use_rook_open_file` | — | low | Proposed |
+| Space | `evaluation.use_space` | — | low | Proposed |
+| Threats / attacked pieces | `evaluation.use_threats` | — | medium | Proposed |
+| Outposts | `evaluation.use_outposts` | `use_pawn_structure` | low | Proposed |
+| Passed-pawn scaling | `evaluation.use_passed_pawn_scaling` | `use_pawn_structure` | low | Proposed |
+| Material imbalance | `evaluation.use_material_imbalance` | — | low | Proposed |
+| Tempo bonus | `evaluation.tempo_cp` | — | negligible | Proposed |
+| Drawishness / contempt | `evaluation.contempt_cp` | — | negligible | Proposed |
+
+#### 3. Per-node evaluation infrastructure (cross-cutting)
+
+| Mechanism | Config key | Depends on | Purpose | Status |
+| --- | --- | --- | --- | --- |
+| Pawn hash table | `evaluation.use_pawn_hash` | `use_pawn_structure` | cache the pawn-structure term | Proposed |
+| Material hash table | `evaluation.use_material_hash` | — | cache material + PSQT base | Proposed |
+| Evaluation cache | `evaluation.use_eval_cache` | — | reuse eval by position key | Proposed |
+| Lazy / staged eval | `evaluation.use_lazy_eval` | — | cheap score first, refine only in-window | Proposed |
+| Incremental accumulator | `evaluation.use_incremental_eval` | push/pop hooks in search | O(Δ) per-node eval | Planned |
+| Tuned weights | `evaluation.weights_path` | — | Texel/SPSA-fitted terms | Planned |
+| Fixed-point (int) eval | `evaluation.use_int_eval` | — | deterministic, fast arithmetic | Proposed |
+| SIMD / batched eval | `evaluation.use_simd_eval` | C++ vectorisation | amortise feature extraction | Proposed |
+
+#### 4. Search-time use of the static eval
+
+| Mechanism | Config key | Depends on | Status |
+| --- | --- | --- | --- |
+| Leaf / QS stand-pat eval | *(always on)* | evaluator backend | Supported |
+| Cheap eval for prune margins (RFP/futility) | `search.use_cheap_prune_eval` | material hash | Proposed |
+| TT eval caching | `search.use_tt_eval_cache` | `use_transposition_table` | Proposed |
+
+#### 5. Search feature surfaces
 
 Only the following feature surfaces are supported and should be used in configs/tests.
 
 | Feature                                   | Config key(s)                                                      |
 | ----------------------------------------- | ------------------------------------------------------------------ |
-| Piece-Square Tables                       | `evaluation.use_pst`                                               |
-| Pawn Structure Tables                     | `evaluation.use_pawn_structure` (requires PST)                     |
-| Mobility Heuristics                       | `evaluation.use_mobility`                                          |
-| King Safety Heuristics                    | `evaluation.use_king_safety`                                       |
-| Game Stage Conscious (GSC)                | `evaluation.game_stage_conscious`                                  |
 | Hash Move Ordering                        | `search.use_hash_move_ordering`                                    |
 | MVV-LVA                                   | `search.use_mvv_lva`                                               |
 | Static Exchange Evaluation (SEE) Ordering | `search.use_see_ordering`                                          |
@@ -319,6 +391,30 @@ Only the following feature surfaces are supported and should be used in configs/
 | TT Aging / Eviction                       | `search.use_tt_aging`                                              |
 
 Note: foundational toggles such as `search.use_alpha_beta`, `search.use_move_ordering`, `search.use_transposition_table`, and `search.use_quiescence_search` remain first-class because they are dependencies for multiple listed features.
+
+#### Evaluation dependency graph
+
+```mermaid
+flowchart TD
+  PST[use_pst] --> PAWN[use_pawn_structure]
+  PST --> TAPER[psqt_tapered]
+  GSC[game_stage_conscious] --> TAPER
+  PAWN --> PAWNHASH[use_pawn_hash]
+  PAWN --> OUTPOST[use_outposts]
+  PAWN --> PASSED[use_passed_pawn_scaling]
+  INCR[use_incremental_eval] --> SFNNUE[nnue_stockfish]
+  INCR --> CUSTNNUE[nnue_custom]
+  MAT[use_material_hash] --> CHEAP[use_cheap_prune_eval]
+  TT[use_transposition_table] --> TTEVAL[use_tt_eval_cache]
+```
+
+#### Recommended implementation order
+
+1. **Tapered PSQT** backend — highest accuracy-per-effort, no `Evaluator` interface change.
+2. **Pawn + material hash** and **lazy eval** — reduce per-node cost without changing the contract.
+3. **Incremental accumulator** — prerequisite for any NNUE backend; add a `go(board)` differential test.
+4. **Stockfish NNUE** backend — reuse an SF-format network loader plus int8 inference.
+5. **Custom NNUE** backend — own architecture and training pipeline.
 
 ## C++ Board API Notes
 

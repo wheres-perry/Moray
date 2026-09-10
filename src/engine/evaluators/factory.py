@@ -19,7 +19,7 @@ from engine.evaluators.components import (
 )
 
 if TYPE_CHECKING:
-    from engine.config import EvaluationConfig
+    from engine.config import EvaluationConfig, ResolvedEvaluationConfig
     from engine.evaluators.base import Evaluator
 
 _ev = chess.evaluators
@@ -65,7 +65,7 @@ class EvaluatorFactory:
     """Build an ``Evaluator`` from an ``EvaluationConfig``."""
 
     @staticmethod
-    def create(config: EvaluationConfig) -> Evaluator:
+    def create(config: EvaluationConfig | ResolvedEvaluationConfig) -> Evaluator:
         """Assemble the evaluator according to *config* flags.
 
         Material counting is always included.  Each optional component is

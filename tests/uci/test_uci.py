@@ -266,3 +266,41 @@ def test_setoption_hash_no_value() -> None:
     h.config.search.tt_size_mb = 16
     _dispatch_and_capture(h, "setoption name Hash")
     assert h.config.search.tt_size_mb == 16
+
+
+def test_setoption_rebuilds_effective_runtime() -> None:
+    """A valid option change is installed into a new compiled search plan."""
+    h = _handler()
+    previous_searcher = h.runtime.searcher
+
+    output = _dispatch_and_capture(h, "setoption name use_pvs value false")
+
+    assert output == []
+    assert h.runtime.searcher is not previous_searcher
+    assert h.runtime.searcher.engine.effective_features["use_pvs"] is False
+
+
+def test_invalid_setoption_preserves_active_runtime() -> None:
+    """An invalid partial reconfiguration never changes requested or applied state."""
+    h = _handler()
+    previous_runtime = h.runtime
+
+    output = _dispatch_and_capture(h, "setoption name use_alpha_beta value false")
+
+    assert output
+    assert output[0].startswith("info string rejected option")
+    assert h.config.search.use_alpha_beta is True
+    assert h.runtime is previous_runtime
+
+
+def test_go_passes_allocated_time_as_per_search_limit() -> None:
+    """UCI clock allocation does not mutate persistent optimization config."""
+    h = _handler()
+    h.runtime.searcher = MagicMock()
+    h.runtime.searcher.search.return_value = (0.0, "e2e4")
+    original = h.config.search.max_time
+
+    _dispatch_and_capture(h, "go movetime 50")
+
+    h.runtime.searcher.search.assert_called_once_with(4, max_time=0.05)
+    assert h.config.search.max_time == original

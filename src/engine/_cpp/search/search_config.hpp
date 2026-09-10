@@ -17,6 +17,7 @@ namespace search {
 struct CppSearchConfig {
   // General
   std::optional<double> max_time;
+  std::optional<int> max_depth;
 
   // Move ordering
   bool use_move_ordering = true;

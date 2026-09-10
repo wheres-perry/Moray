@@ -12,10 +12,14 @@
 - [x] Fix ASAN/UBSAN sanitizer session in nox (`exit code -6` in `tests_all`)
 
 ## Engine & Search Improvements
-- [ ] Implement and evaluate different evaluators:
+- [ ] Implement and evaluate different evaluators (see `docs/EVALUATION_PLAN.md`):
     - [ ] Simple Hand-Coded Evaluation (current)
     - [ ] PeSTO-style tapered evaluation
-    - [ ] NNUE (Efficiently Updatable Neural Network) integration
+    - [ ] Piece-count baseline (`piece_count`) for search sanity testing
+    - [ ] Random-piece baseline (`random_piece`, seeded) for search sanity testing
+    - [ ] Stockfish-distilled PST source (`pst_source=stockfish_distilled`, black-box distillation)
+    - [ ] Stockfish NNUE (HalfKAv2_hm, SF-format network loader)
+    - [ ] Custom NNUE (own architecture + training pipeline)
 - [ ] Static Exchange Evaluation (SEE) for better move ordering and pruning
 - [ ] Syzygy Tablebase Integration in the search loop
 - [ ] Refine Null Move Pruning (NMP) with adaptive reduction

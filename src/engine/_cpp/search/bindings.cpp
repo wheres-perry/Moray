@@ -9,6 +9,7 @@
 #include "move_sorter.hpp"
 #include "search.hpp"
 #include "search_config.hpp"
+#include "static_exchange.hpp"
 #include "transposition_table.hpp"
 #include "zobrist.hpp"
 
@@ -17,10 +18,8 @@ using namespace search;
 
 namespace {
 
-// Shared holders keep a CppSearchConfig alive alongside the underlying
-// object so the object's const-ref to the config remains valid for the
-// lifetime of the Python wrapper.  They also give the Minimax binding a
-// single place to reach through to the underlying C++ object.
+// Holders retain the applied CppSearchConfig for introspection and give the
+// Minimax binding a single place to reach through to the underlying objects.
 struct TTHolder {
   CppSearchConfig config;
   TranspositionTable table;
@@ -41,14 +40,16 @@ struct MinimaxHolder {
   // the holder cannot outlive them.
   py::object tt_ref;
   py::object sorter_ref;
+  py::object see_ref;
   py::object zobrist_ref;
   py::object evaluator_ref;
 
   MinimaxHolder(Board &board, evaluators::IEvaluator &evaluator,
-                TranspositionTable *tt, MoveSorter *sorter, Zobrist *zobrist,
+                TranspositionTable *tt, MoveSorter *sorter,
+                StaticExchangeEvaluator *see, Zobrist *zobrist,
                 CppSearchConfig cfg)
       : config(std::move(cfg)),
-        minimax(board, evaluator, tt, sorter, zobrist, config) {}
+        minimax(board, evaluator, tt, sorter, see, zobrist, config) {}
 };
 
 TTBound bound_from_string(const std::string &bound) {
@@ -97,6 +98,12 @@ CppSearchConfig config_from_py(const py::object &py_config) {
     py::object mt = py_config.attr("max_time");
     if (!mt.is_none()) {
       cfg.max_time = mt.cast<double>();
+    }
+  }
+  if (py::hasattr(py_config, "max_depth")) {
+    py::object depth = py_config.attr("max_depth");
+    if (!depth.is_none()) {
+      cfg.max_depth = depth.cast<int>();
     }
   }
 
@@ -168,6 +175,55 @@ CppSearchConfig config_from_py(const py::object &py_config) {
   return cfg;
 }
 
+py::dict config_to_dict(const CppSearchConfig &cfg) {
+  py::dict result;
+  result["max_time"] =
+      cfg.max_time.has_value() ? py::cast(*cfg.max_time) : py::none();
+  result["max_depth"] =
+      cfg.max_depth.has_value() ? py::cast(*cfg.max_depth) : py::none();
+  result["use_move_ordering"] = cfg.use_move_ordering;
+  result["use_mvv_lva"] = cfg.use_mvv_lva;
+  result["use_history_heuristic"] = cfg.use_history_heuristic;
+  result["history_max_score"] = cfg.history_max_score;
+  result["use_countermove_heuristic"] = cfg.use_countermove_heuristic;
+  result["use_see_ordering"] = cfg.use_see_ordering;
+  result["see_capture_threshold"] = cfg.see_capture_threshold;
+  result["use_killer_moves"] = cfg.use_killer_moves;
+  result["killer_slots_per_ply"] = cfg.killer_slots_per_ply;
+  result["use_hash_move_ordering"] = cfg.use_hash_move_ordering;
+  result["use_alpha_beta"] = cfg.use_alpha_beta;
+  result["use_pvs"] = cfg.use_pvs;
+  result["use_quiescence_search"] = cfg.use_quiescence_search;
+  result["qs_max_depth"] = cfg.qs_max_depth;
+  result["use_iid"] = cfg.use_iid;
+  result["iid_min_depth"] = cfg.iid_min_depth;
+  result["iid_depth_reduction"] = cfg.iid_depth_reduction;
+  result["use_null_move_pruning"] = cfg.use_null_move_pruning;
+  result["nmp_reduction_r"] = cfg.nmp_reduction_r;
+  result["nmp_min_depth"] = cfg.nmp_min_depth;
+  result["use_lmr"] = cfg.use_lmr;
+  result["lmr_min_depth"] = cfg.lmr_min_depth;
+  result["lmr_min_move_number"] = cfg.lmr_min_move_number;
+  result["use_futility_pruning"] = cfg.use_futility_pruning;
+  result["futility_margin_standard"] = cfg.futility_margin_standard;
+  result["use_extended_futility_pruning"] = cfg.use_extended_futility_pruning;
+  result["futility_margin_extended"] = cfg.futility_margin_extended;
+  result["use_reverse_futility_pruning"] = cfg.use_reverse_futility_pruning;
+  result["rfp_margin_multiplier"] = cfg.rfp_margin_multiplier;
+  result["rfp_max_depth"] = cfg.rfp_max_depth;
+  result["use_delta_pruning"] = cfg.use_delta_pruning;
+  result["delta_margin"] = cfg.delta_margin;
+  result["use_see_pruning_in_qs"] = cfg.use_see_pruning_in_qs;
+  result["use_aspiration_windows"] = cfg.use_aspiration_windows;
+  result["aspiration_window_margin"] = cfg.aspiration_window_margin;
+  result["use_check_extensions"] = cfg.use_check_extensions;
+  result["max_check_extensions"] = cfg.max_check_extensions;
+  result["use_transposition_table"] = cfg.use_transposition_table;
+  result["tt_size_mb"] = cfg.tt_size_mb;
+  result["use_tt_aging"] = cfg.use_tt_aging;
+  return result;
+}
+
 } // namespace
 
 void init_search_bindings(py::module_ &m) {
@@ -183,6 +239,11 @@ void init_search_bindings(py::module_ &m) {
       .def("set_current_hash", &Zobrist::set_current_hash, "Set current hash",
            py::arg("hash_val"))
       .def("invalidate_hash", &Zobrist::invalidate_hash, "Invalidate hash");
+
+  py::class_<StaticExchangeEvaluator>(m, "StaticExchangeEvaluator")
+      .def(py::init<>())
+      .def("evaluate", &StaticExchangeEvaluator::evaluate, py::arg("board"),
+           py::arg("move"));
 
   // ── Transposition table ───────────────────────────────────────────
   py::class_<TTEntry>(m, "TTEntry")
@@ -423,38 +484,45 @@ void init_search_bindings(py::module_ &m) {
   // and Zobrist holders; this binding stitches them together via raw
   // pointers while holding Python references to keep them alive.
   py::class_<MinimaxHolder>(m, "CppMinimax")
-      .def(py::init([](Board &board, py::object evaluator_obj,
-                       py::object tt_obj, py::object sorter_obj,
-                       py::object zobrist_obj, py::object py_config) {
-             auto &evaluator = evaluator_obj.cast<evaluators::IEvaluator &>();
-             TranspositionTable *tt_ptr = nullptr;
-             MoveSorter *sorter_ptr = nullptr;
-             Zobrist *zobrist_ptr = nullptr;
-             if (!tt_obj.is_none()) {
-               tt_ptr = &tt_obj.cast<TTHolder &>().table;
-             }
-             if (!sorter_obj.is_none()) {
-               sorter_ptr = &sorter_obj.cast<MoveSorterHolder &>().sorter;
-             }
-             if (!zobrist_obj.is_none()) {
-               zobrist_ptr = &zobrist_obj.cast<Zobrist &>();
-             }
-             auto holder = std::make_unique<MinimaxHolder>(
-                 board, evaluator, tt_ptr, sorter_ptr, zobrist_ptr,
-                 config_from_py(py_config));
-             holder->tt_ref = std::move(tt_obj);
-             holder->sorter_ref = std::move(sorter_obj);
-             holder->zobrist_ref = std::move(zobrist_obj);
-             holder->evaluator_ref = std::move(evaluator_obj);
-             return holder;
-           }),
-           py::keep_alive<1, 2>(), py::arg("board"), py::arg("evaluator"),
-           py::arg("tt"), py::arg("sorter"), py::arg("zobrist"),
-           py::arg("config"))
+      .def(
+          py::init([](Board &board, py::object evaluator_obj, py::object tt_obj,
+                      py::object sorter_obj, py::object see_obj,
+                      py::object zobrist_obj, py::object py_config) {
+            auto &evaluator = evaluator_obj.cast<evaluators::IEvaluator &>();
+            TranspositionTable *tt_ptr = nullptr;
+            MoveSorter *sorter_ptr = nullptr;
+            StaticExchangeEvaluator *see_ptr = nullptr;
+            Zobrist *zobrist_ptr = nullptr;
+            if (!tt_obj.is_none()) {
+              tt_ptr = &tt_obj.cast<TTHolder &>().table;
+            }
+            if (!sorter_obj.is_none()) {
+              sorter_ptr = &sorter_obj.cast<MoveSorterHolder &>().sorter;
+            }
+            if (!see_obj.is_none()) {
+              see_ptr = &see_obj.cast<StaticExchangeEvaluator &>();
+            }
+            if (!zobrist_obj.is_none()) {
+              zobrist_ptr = &zobrist_obj.cast<Zobrist &>();
+            }
+            auto holder = std::make_unique<MinimaxHolder>(
+                board, evaluator, tt_ptr, sorter_ptr, see_ptr, zobrist_ptr,
+                config_from_py(py_config));
+            holder->tt_ref = std::move(tt_obj);
+            holder->sorter_ref = std::move(sorter_obj);
+            holder->see_ref = std::move(see_obj);
+            holder->zobrist_ref = std::move(zobrist_obj);
+            holder->evaluator_ref = std::move(evaluator_obj);
+            return holder;
+          }),
+          py::keep_alive<1, 2>(), py::arg("board"), py::arg("evaluator"),
+          py::arg("tt"), py::arg("sorter"), py::arg("see"), py::arg("zobrist"),
+          py::arg("config"))
       .def(
           "find_best_move",
-          [](MinimaxHolder &h, int depth) -> py::tuple {
-            Minimax::Result result = h.minimax.find_best_move(depth);
+          [](MinimaxHolder &h, int depth,
+             std::optional<double> max_time) -> py::tuple {
+            Minimax::Result result = h.minimax.find_best_move(depth, max_time);
             py::object score =
                 result.score.has_value() ? py::cast(*result.score) : py::none();
             py::object best_move = result.best_move.has_value()
@@ -462,7 +530,7 @@ void init_search_bindings(py::module_ &m) {
                                        : py::none();
             return py::make_tuple(score, best_move);
           },
-          py::arg("depth"))
+          py::arg("depth"), py::arg("max_time") = py::none())
       .def(
           "reset_state",
           [](MinimaxHolder &h, bool clear_tt, bool clear_history,
@@ -477,6 +545,39 @@ void init_search_bindings(py::module_ &m) {
             return h.minimax.stats();
           },
           py::return_value_policy::reference_internal)
+      .def_property_readonly("effective_features",
+                             [](const MinimaxHolder &h) {
+                               py::dict result;
+                               const SearchPlan &plan = h.minimax.plan();
+                               for (size_t index = 0;
+                                    index < SEARCH_FEATURE_NAMES.size();
+                                    ++index) {
+                                 result[py::str(SEARCH_FEATURE_NAMES[index])] =
+                                     plan.features[index];
+                               }
+                               return result;
+                             })
+      .def_property_readonly(
+          "effective_config",
+          [](const MinimaxHolder &h) { return config_to_dict(h.config); })
+      .def_property_readonly(
+          "feature_stats",
+          [](const MinimaxHolder &h) {
+            py::dict result;
+            const auto &values = h.minimax.stats().feature_telemetry;
+            for (size_t index = 0; index < SEARCH_FEATURE_NAMES.size();
+                 ++index) {
+              const auto &stats = values[index];
+              py::dict item;
+              item["considered"] = stats.considered;
+              item["eligible"] = stats.eligible;
+              item["applied"] = stats.applied;
+              item["cutoffs"] = stats.cutoffs;
+              item["researches"] = stats.researches;
+              result[py::str(SEARCH_FEATURE_NAMES[index])] = std::move(item);
+            }
+            return result;
+          })
       .def_property_readonly(
           "node_count",
           [](const MinimaxHolder &h) { return h.minimax.node_count(); })

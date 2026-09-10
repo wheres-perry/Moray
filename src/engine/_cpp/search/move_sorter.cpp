@@ -63,8 +63,17 @@ std::vector<Move>
 MoveSorter::sort_moves(Board &board, const std::vector<Move> &moves, int ply,
                        std::optional<Move> hash_move,
                        std::optional<Move> previous_move) const {
+  if (auto *stats = feature_stats(SearchFeature::MOVE_ORDERING)) {
+    stats->considered += 1;
+    if (moves.size() > 1) {
+      stats->eligible += 1;
+    }
+  }
   if (!config_.use_move_ordering || moves.size() <= 1) {
     return moves;
+  }
+  if (auto *stats = feature_stats(SearchFeature::MOVE_ORDERING)) {
+    stats->applied += 1;
   }
 
   const size_t n = moves.size();
@@ -128,9 +137,18 @@ MoveSorter::sort_tactical(Board &board, const std::vector<Move> &moves) const {
 int MoveSorter::score_move(Board &board, const Move &move, int ply,
                            std::optional<Move> hash_move,
                            std::optional<Move> previous_move) const noexcept {
-  if (MS_UNLIKELY(config_.use_hash_move_ordering && hash_move.has_value() &&
-                  move == *hash_move)) {
-    return HASH_MOVE_SCORE;
+  if (config_.use_hash_move_ordering) {
+    auto *stats = feature_stats(SearchFeature::HASH_MOVE_ORDERING);
+    if (stats != nullptr) {
+      stats->considered += 1;
+    }
+    if (MS_UNLIKELY(hash_move.has_value() && move == *hash_move)) {
+      if (stats != nullptr) {
+        stats->eligible += 1;
+        stats->applied += 1;
+      }
+      return HASH_MOVE_SCORE;
+    }
   }
 
   if (board.is_capture(move) || is_promotion(move)) {
@@ -138,23 +156,45 @@ int MoveSorter::score_move(Board &board, const Move &move, int ply,
   }
 
   if (config_.use_killer_moves && ply >= 0 && ply < MAX_PLY) {
+    auto *stats = feature_stats(SearchFeature::KILLER_MOVES);
+    if (stats != nullptr) {
+      stats->considered += 1;
+    }
     const int count = killer_counts_[ply];
     for (int slot = 0; slot < count; ++slot) {
       if (killer_moves_[ply][slot] == move) {
+        if (stats != nullptr) {
+          stats->eligible += 1;
+          stats->applied += 1;
+        }
         return KILLER_BASE - (slot * 1024);
       }
     }
   }
 
   if (config_.use_countermove_heuristic && previous_move.has_value()) {
+    auto *stats = feature_stats(SearchFeature::COUNTERMOVE_HEURISTIC);
+    if (stats != nullptr) {
+      stats->considered += 1;
+    }
     const auto cm = countermove_get(previous_move->from, previous_move->to,
                                     previous_move->promotion);
     if (cm.has_value() && *cm == move) {
+      if (stats != nullptr) {
+        stats->eligible += 1;
+        stats->applied += 1;
+      }
       return COUNTERMOVE_SCORE;
     }
   }
 
   if (config_.use_history_heuristic) {
+    auto *stats = feature_stats(SearchFeature::HISTORY_HEURISTIC);
+    if (stats != nullptr) {
+      stats->considered += 1;
+      stats->eligible += 1;
+      stats->applied += 1;
+    }
     const int hist = history_get(move.from, move.to, move.promotion);
     return std::min(hist, config_.history_max_score);
   }
@@ -167,6 +207,11 @@ int MoveSorter::score_tactical_move(Board &board,
   int score = TACTICAL_BASE;
   const bool is_cap = board.is_capture(move);
   if (config_.use_mvv_lva && is_cap) {
+    if (auto *stats = feature_stats(SearchFeature::MVV_LVA)) {
+      stats->considered += 1;
+      stats->eligible += 1;
+      stats->applied += 1;
+    }
     score += mvv_lva(board, move);
   }
   if (is_promotion(move)) {
@@ -176,6 +221,11 @@ int MoveSorter::score_tactical_move(Board &board,
     }
   }
   if (config_.use_see_ordering && is_cap) {
+    if (auto *stats = feature_stats(SearchFeature::SEE_ORDERING)) {
+      stats->considered += 1;
+      stats->eligible += 1;
+      stats->applied += 1;
+    }
     const int see_value = see(board, move);
     if (see_value < config_.see_capture_threshold) {
       score -= 50'000;
@@ -193,64 +243,7 @@ int MoveSorter::mvv_lva(const Board &board, const Move &move) const noexcept {
 }
 
 int MoveSorter::see(Board &board, const Move &move) const {
-  if (!board.is_capture(move)) {
-    return 0;
-  }
-
-  Board sim = board;
-
-  int gains[32];
-  int gain_count = 0;
-
-  int gain = 0;
-  auto victim_piece = sim.piece_at(move.to);
-  if (!victim_piece && sim.is_en_passant(move)) {
-    gain = PAWN_VALUE;
-  } else if (victim_piece) {
-    gain = piece_value(victim_piece->type);
-  }
-  gains[gain_count++] = gain;
-
-  sim.push(move);
-  const uint8_t target_sq = move.to;
-
-  while (gain_count < 32) {
-    Move best_attacker_move{};
-    bool has_best = false;
-    int lowest_attacker = std::numeric_limits<int>::max();
-
-    for (const auto &next_move : sim.generate_legal_moves()) {
-      if (next_move.to != target_sq) {
-        continue;
-      }
-      if (!sim.is_capture(next_move)) {
-        continue;
-      }
-      auto attacker = sim.piece_at(next_move.from);
-      const int atk_val = attacker ? piece_value(attacker->type) : 0;
-      if (atk_val < lowest_attacker) {
-        lowest_attacker = atk_val;
-        best_attacker_move = next_move;
-        has_best = true;
-      }
-    }
-
-    if (!has_best) {
-      break;
-    }
-
-    auto captured = sim.piece_at(target_sq);
-    const int capture_gain = captured ? piece_value(captured->type) : 0;
-    gains[gain_count++] = capture_gain;
-
-    sim.push(best_attacker_move);
-  }
-
-  int score = 0;
-  for (int i = gain_count - 1; i >= 0; --i) {
-    score = std::max(0, gains[i] - score);
-  }
-  return score;
+  return see_service_.evaluate(board, move);
 }
 
 void MoveSorter::on_beta_cutoff(const Move &move, int ply, int depth,
@@ -261,6 +254,11 @@ void MoveSorter::on_beta_cutoff(const Move &move, int ply, int depth,
   }
 
   if (config_.use_killer_moves && ply >= 0 && ply < MAX_PLY) {
+    auto *stats = feature_stats(SearchFeature::KILLER_MOVES);
+    if (stats != nullptr) {
+      stats->considered += 1;
+      stats->eligible += 1;
+    }
     const int count = killer_counts_[ply];
     for (int i = 0; i < count; ++i) {
       if (killer_moves_[ply][i] == move) {
@@ -278,9 +276,17 @@ void MoveSorter::on_beta_cutoff(const Move &move, int ply, int depth,
     }
     killer_moves_[ply][0] = move;
     killer_counts_[ply] = new_count;
+    if (stats != nullptr) {
+      stats->applied += 1;
+    }
   }
 
   if (config_.use_history_heuristic) {
+    auto *stats = feature_stats(SearchFeature::HISTORY_HEURISTIC);
+    if (stats != nullptr) {
+      stats->considered += 1;
+      stats->eligible += 1;
+    }
     const int idx = history_index(move.from, move.to, move.promotion);
     const int bonus = depth * depth;
     int current = history_table_[idx];
@@ -290,13 +296,24 @@ void MoveSorter::on_beta_cutoff(const Move &move, int ply, int depth,
     }
     history_table_[idx] = current;
     history_present_[idx] = true;
+    if (stats != nullptr) {
+      stats->applied += 1;
+    }
   }
 
   if (config_.use_countermove_heuristic && previous_move.has_value()) {
+    auto *stats = feature_stats(SearchFeature::COUNTERMOVE_HEURISTIC);
+    if (stats != nullptr) {
+      stats->considered += 1;
+      stats->eligible += 1;
+    }
     const int idx = history_index(previous_move->from, previous_move->to,
                                   previous_move->promotion);
     countermove_table_[idx] = move;
     countermove_present_[idx] = true;
+    if (stats != nullptr) {
+      stats->applied += 1;
+    }
   }
 }
 

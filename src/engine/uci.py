@@ -4,10 +4,15 @@ import contextlib
 import logging
 import sys
 from collections.abc import Callable
-from dataclasses import fields
 from typing import ClassVar
 
 from engine.config import EngineConfig
+from engine.config_registry import (
+    EVALUATION_FEATURES,
+    SEARCH_FEATURES,
+    SEARCH_PARAMETERS,
+)
+from engine.config_solver import ConfigSolverError
 from engine.factory import STARTING_FEN, create_engine_runtime
 
 _MAX_DEPTH = 100
@@ -16,6 +21,21 @@ _MAX_DEPTH = 100
 def _out(msg: str) -> None:
     """Output to stdout with flush."""
     print(msg, flush=True)
+
+
+def _parse_option_value(current_value: object, value: str) -> bool | int:
+    """Parse a UCI value using the current registered field's scalar type."""
+    if type(current_value) is bool:
+        normalized = value.lower()
+        if normalized not in {"true", "false"}:
+            raise ValueError("boolean value must be true or false")
+        return normalized == "true"
+    if type(current_value) is int:
+        try:
+            return int(value)
+        except ValueError as error:
+            raise ValueError("value must be an integer") from error
+    raise ValueError("unsupported option type")
 
 
 class UCIHandler:
@@ -57,26 +77,19 @@ class UCIHandler:
         _out("id name Moray")
         _out("id author wheres-perry")
 
-        for config_obj in (self.config.search, self.config.evaluation):
-            for field in fields(config_obj):
-                name = field.name
-                if name in ("max_time", "max_depth", "tt_size_mb"):
-                    continue
+        for feature_spec in (*SEARCH_FEATURES, *EVALUATION_FEATURES):
+            config_obj = getattr(self.config, feature_spec.scope)
+            feature_value = bool(getattr(config_obj, feature_spec.name))
+            default = "true" if feature_value else "false"
+            _out(f"option name {feature_spec.name} type check default {default}")
 
-                value = getattr(config_obj, name)
-                if isinstance(value, bool):
-                    default_str = "true" if value else "false"
-                    _out(f"option name {name} type check default {default_str}")
-                elif isinstance(value, int):
-                    _out(
-                        f"option name {name} type spin default {value} "
-                        "min -1000000 max 1000000"
-                    )
-
-        _out(
-            f"option name Hash type spin default {self.config.search.tt_size_mb} "
-            "min 1 max 1024"
-        )
+        for parameter_spec in SEARCH_PARAMETERS:
+            name = parameter_spec.uci_name or parameter_spec.name
+            parameter_value = int(getattr(self.config.search, parameter_spec.name))
+            _out(
+                f"option name {name} type spin default {parameter_value} "
+                f"min {parameter_spec.minimum} max {parameter_spec.maximum}"
+            )
         _out("uciok")
 
     def _isready(self, _args: list[str] | None = None) -> None:
@@ -143,12 +156,13 @@ class UCIHandler:
                 idx = args.index("depth")
                 depth = int(args[idx + 1])
 
-        # Time control allocation
+        max_time: float | None = None
+        # Time control allocation is a per-search limit, not persistent config.
         if "movetime" in args:
             with contextlib.suppress(ValueError, IndexError):
                 idx = args.index("movetime")
                 mtime_ms = int(args[idx + 1])
-                self.config.search.max_time = max(0.01, mtime_ms / 1000.0)
+                max_time = max(0.01, mtime_ms / 1000.0)
         elif "wtime" in args or "btime" in args:
             side_is_white = "b" not in self.runtime.board.fen().split()[1]
             my_time_key = "wtime" if side_is_white else "btime"
@@ -170,9 +184,12 @@ class UCIHandler:
             # Allocate time per move: ~1/20th of remaining time + 80% of increment
             time_sec = (my_time_ms / 20.0 + my_inc_ms * 0.8) / 1000.0
             max_time_sec = max(0.01, min(my_time_ms / 1000.0 * 0.95, time_sec))
-            self.config.search.max_time = max_time_sec
+            max_time = max_time_sec
 
-        _score, best_move = self.runtime.searcher.search(depth)
+        if max_time is None:
+            _score, best_move = self.runtime.searcher.search(depth)
+        else:
+            _score, best_move = self.runtime.searcher.search(depth, max_time=max_time)
 
         if best_move:
             _out(f"bestmove {best_move}")
@@ -212,15 +229,32 @@ class UCIHandler:
         if name == "Hash":
             name = "tt_size_mb"
 
-        for config_obj in (self.config.search, self.config.evaluation):
+        candidate = EngineConfig.from_dict(self.config.to_dict())
+        changed = False
+        for config_obj in (candidate.search, candidate.evaluation):
             if hasattr(config_obj, name):
                 current_value = getattr(config_obj, name)
-                if isinstance(current_value, bool):
-                    setattr(config_obj, name, value.lower() == "true")
-                elif isinstance(current_value, int):
-                    with contextlib.suppress(ValueError):
-                        setattr(config_obj, name, int(value))
+                try:
+                    parsed = _parse_option_value(current_value, value)
+                except ValueError as error:
+                    _out(f"info string rejected option {name}: {error}")
+                    return
+                setattr(config_obj, name, parsed)
+                changed = True
                 break
+
+        if not changed:
+            return
+
+        current_fen = self.runtime.board.fen()
+        try:
+            runtime = create_engine_runtime(candidate, current_fen)
+        except (ConfigSolverError, ValueError, OverflowError, RuntimeError) as error:
+            _out(f"info string rejected option {name}: {error}")
+            return
+
+        self.config = candidate
+        self.runtime = runtime
 
     _CommandHandler = Callable[["UCIHandler", list[str] | None], None]
 

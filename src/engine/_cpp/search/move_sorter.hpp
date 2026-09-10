@@ -16,6 +16,8 @@
 
 #include "../board/board.hpp"
 #include "search_config.hpp"
+#include "search_plan.hpp"
+#include "static_exchange.hpp"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define MS_LIKELY(x) __builtin_expect(!!(x), 1)
@@ -72,6 +74,10 @@ public:
                             const Move &move) const noexcept;
 
   [[nodiscard]] int see(Board &board, const Move &move) const;
+
+  void set_telemetry(TelemetrySet *telemetry) noexcept {
+    telemetry_ = telemetry;
+  }
 
   void on_beta_cutoff(const Move &move, int ply, int depth,
                       std::optional<Move> previous_move,
@@ -144,7 +150,16 @@ private:
     return move.promotion != 0;
   }
 
-  const CppSearchConfig &config_;
+  inline FeatureTelemetry *feature_stats(SearchFeature feature) const noexcept {
+    if (telemetry_ == nullptr) {
+      return nullptr;
+    }
+    return &(*telemetry_)[feature_index(feature)];
+  }
+
+  const CppSearchConfig config_;
+  StaticExchangeEvaluator see_service_;
+  mutable TelemetrySet *telemetry_ = nullptr;
 
   // Dense killer storage.  killer_counts_[ply] tracks the occupied slots.
   alignas(64)

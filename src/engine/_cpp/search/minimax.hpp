@@ -15,6 +15,8 @@
 #include "../evaluators/evaluators.hpp"
 #include "move_sorter.hpp"
 #include "search_config.hpp"
+#include "search_plan.hpp"
+#include "static_exchange.hpp"
 #include "transposition_table.hpp"
 #include "zobrist.hpp"
 
@@ -43,6 +45,7 @@ struct MinimaxStats {
   uint64_t root_move_changes = 0;
   double history_saturation = 0.0;
   int score = 0;
+  TelemetrySet feature_telemetry{};
 
   void reset() noexcept { *this = MinimaxStats{}; }
 };
@@ -53,8 +56,9 @@ public:
   static constexpr int TIME_CHECK_INTERVAL = 2048;
 
   Minimax(Board &board, evaluators::IEvaluator &evaluator,
-          TranspositionTable *tt, MoveSorter *sorter, Zobrist *zobrist,
-          const CppSearchConfig &config) noexcept;
+          TranspositionTable *tt, MoveSorter *sorter,
+          StaticExchangeEvaluator *see, Zobrist *zobrist,
+          const CppSearchConfig &config);
 
   // Reset per-search state (stats, node counter, time flag).  Optionally
   // clear the TT and move-sorter history/killer tables.
@@ -69,9 +73,11 @@ public:
     std::optional<Move> best_move;
   };
 
-  Result find_best_move(int depth);
+  Result find_best_move(int depth,
+                        std::optional<double> max_time_override = std::nullopt);
 
   [[nodiscard]] const MinimaxStats &stats() const noexcept { return stats_; }
+  [[nodiscard]] const SearchPlan &plan() const noexcept { return plan_; }
   [[nodiscard]] uint64_t node_count() const noexcept { return stats_.nodes; }
 
   // Time-limit helpers — exposed so the Python wrapper can forward the
@@ -92,12 +98,14 @@ private:
   evaluators::IEvaluator &evaluator_;
   TranspositionTable *tt_;
   MoveSorter *move_sorter_;
+  StaticExchangeEvaluator *see_;
   Zobrist *zobrist_;
-  const CppSearchConfig &config_;
+  const SearchPlan plan_;
   MinimaxStats stats_;
 
   std::optional<Clock::time_point> start_time_;
   bool time_up_ = false;
+  std::optional<double> active_max_time_;
   std::optional<Move> root_best_move_;
 
   // Core search functions.
@@ -169,38 +177,22 @@ private:
   [[nodiscard]] inline bool is_tactical_move(const Move &move) const noexcept {
     return board_.is_capture(move) || move.promotion != 0;
   }
-  [[nodiscard]] inline bool
-  can_apply_futility(int depth, double static_eval, double alpha, bool in_check,
-                     bool is_tactical) const noexcept {
-    if (!config_.use_alpha_beta || in_check || is_tactical) {
-      return false;
-    }
-    if (config_.use_futility_pruning && depth == 1 &&
-        static_eval + static_cast<double>(config_.futility_margin_standard) <=
-            alpha) {
-      return true;
-    }
-    return config_.use_extended_futility_pruning && depth == 2 &&
-           static_eval +
-                   static_cast<double>(config_.futility_margin_extended) <=
-               alpha;
-  }
   [[nodiscard]] inline bool can_apply_lmr(int move_index, int depth,
                                           bool in_check, bool gives_check,
                                           bool is_tactical) const noexcept {
-    if (!config_.use_lmr || in_check || gives_check || is_tactical) {
+    if (!plan_.pruning.lmr || in_check || gives_check || is_tactical) {
       return false;
     }
-    if (depth < config_.lmr_min_depth) {
+    if (depth < plan_.pruning.lmr_min_depth) {
       return false;
     }
-    return move_index >= config_.lmr_min_move_number;
+    return move_index >= plan_.pruning.lmr_min_move_number;
   }
   [[nodiscard]] static int lmr_reduction(int depth, int move_index) noexcept;
   [[nodiscard]] inline TTBound determine_bound(double best_score,
                                                double original_alpha,
                                                double beta) const noexcept {
-    if (!config_.use_alpha_beta) {
+    if (!plan_.algorithm.alpha_beta) {
       return TTBound::EXACT;
     }
     if (best_score <= original_alpha) {
@@ -210,6 +202,11 @@ private:
       return TTBound::LOWER;
     }
     return TTBound::EXACT;
+  }
+
+  [[nodiscard]] inline FeatureTelemetry &
+  telemetry(SearchFeature feature) noexcept {
+    return stats_.feature_telemetry[feature_index(feature)];
   }
 };
 

@@ -17,6 +17,7 @@ pybind11_add_module(moray_core
     src/engine/_cpp/search/search.cpp
     src/engine/_cpp/search/zobrist.cpp
     src/engine/_cpp/search/transposition_table.cpp
+    src/engine/_cpp/search/static_exchange.cpp
     src/engine/_cpp/search/move_sorter.cpp
     src/engine/_cpp/search/minimax.cpp
     src/engine/_cpp/search/bindings.cpp
@@ -51,6 +52,9 @@ if(NOT MSVC)
         -march=native
         -mtune=native
         -ffast-math
+        # Search windows intentionally use IEEE +/-infinity sentinels, and
+        # configuration validation must distinguish infinity and NaN.
+        -fno-finite-math-only
         -funroll-loops
         -finline-functions
         -flto

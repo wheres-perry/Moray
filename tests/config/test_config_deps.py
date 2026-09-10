@@ -18,6 +18,7 @@ from engine.config_solver import (
     ConfigSolver,
     ConfigSolverError,
 )
+from engine.configurations import minimal_config
 
 
 class TestConfigSolverBasics:
@@ -59,8 +60,7 @@ class TestZobristDependencies:
 
     def test_tt_aging_requires_tt(self):
         """Test that TT aging without TT raises error."""
-        config = EngineConfig()
-        config.search.use_transposition_table = False
+        config = minimal_config()
         config.search.use_tt_aging = True
 
         solver = ConfigSolver(config)
@@ -86,96 +86,82 @@ class TestAlphaBetaDependencies:
 
     def test_pvs_requires_alpha_beta(self):
         """Test that PVS without alpha-beta raises error."""
-        config = EngineConfig()
+        config = minimal_config()
         config.search.use_pvs = True
-        config.search.use_alpha_beta = False
-        config.search.use_move_ordering = True
-        config.search.use_killer_moves = False
-        config.search.use_history_heuristic = False
-        config.search.use_countermove_heuristic = False
-        # Disable other features that also depend on alpha-beta
-        config.search.use_aspiration_windows = False
-        config.search.use_null_move_pruning = False
-        config.search.use_futility_pruning = False
-        config.search.use_extended_futility_pruning = False
-        config.search.use_reverse_futility_pruning = False
-        config.search.use_quiescence_search = False
-        config.search.use_check_extensions = False
-        config.search.use_lmr = False
-        config.search.use_delta_pruning = False
-        config.search.use_see_pruning_in_qs = False
 
         solver = ConfigSolver(config)
 
         with pytest.raises(
             ConfigSolverError,
-            match="PVS requires both alpha-beta pruning and move ordering",
+            match=r"Principal Variation Search requires.*use_alpha_beta",
         ):
             solver.solve()
 
     def test_aspiration_windows_requires_alpha_beta(self):
         """Test that aspiration windows without alpha-beta raises error."""
-        config = EngineConfig()
+        config = minimal_config()
         config.search.use_aspiration_windows = True
-        config.search.use_alpha_beta = False
 
         solver = ConfigSolver(config)
 
-        # Will catch PVS error first (default is True) or aspiration error
-        with pytest.raises(ConfigSolverError):
+        with pytest.raises(
+            ConfigSolverError,
+            match=r"Aspiration windows requires.*use_alpha_beta",
+        ):
             solver.solve()
 
     def test_null_move_pruning_requires_alpha_beta(self):
         """Test that null move pruning without alpha-beta raises error."""
-        config = EngineConfig()
+        config = minimal_config()
         config.search.use_null_move_pruning = True
-        config.search.use_alpha_beta = False
 
         solver = ConfigSolver(config)
 
-        # Will catch some alpha-beta dependency error
-        with pytest.raises(ConfigSolverError):
+        with pytest.raises(
+            ConfigSolverError,
+            match=r"Null-move pruning requires.*use_alpha_beta",
+        ):
             solver.solve()
 
 
 class TestMoveOrderingDependencies:
     """Test move ordering related dependencies."""
 
-    def test_lmr_requires_both_alpha_beta_and_move_ordering(self):
-        """Test that LMR requires both alpha-beta and move ordering."""
-        config = EngineConfig()
+    @pytest.mark.parametrize(
+        ("alpha_beta", "move_ordering"),
+        [(False, False), (False, True), (True, False), (True, True)],
+    )
+    def test_lmr_composes_with_window_and_ordering_policies(
+        self, alpha_beta: bool, move_ordering: bool
+    ):
+        """LMR is structurally supported in every policy combination."""
+        config = minimal_config()
         config.search.use_lmr = True
-        config.search.use_alpha_beta = True
-        config.search.use_move_ordering = False
+        config.search.use_alpha_beta = alpha_beta
+        config.search.use_move_ordering = move_ordering
 
-        solver = ConfigSolver(config)
-
-        with pytest.raises(ConfigSolverError):
-            solver.solve()
+        assert ConfigSolver(config).solve().use_lmr is True
 
     def test_hash_move_ordering_requires_move_ordering(self):
         """Test that hash move ordering requires move ordering."""
-        config = EngineConfig()
+        config = minimal_config()
         config.search.use_hash_move_ordering = True
-        config.search.use_move_ordering = False
+        config.search.use_transposition_table = True
 
         solver = ConfigSolver(config)
 
-        # Will catch LMR or hash move ordering error
-        with pytest.raises(ConfigSolverError):
+        with pytest.raises(ConfigSolverError, match="Hash-move ordering"):
             solver.solve()
 
     def test_hash_move_ordering_requires_transposition_table(self):
         """Test that hash move ordering requires transposition table."""
-        config = EngineConfig()
+        config = minimal_config()
         config.search.use_hash_move_ordering = True
         config.search.use_move_ordering = True
-        config.search.use_transposition_table = False
-        config.search.use_tt_aging = False  # Must also disable TT aging
 
         solver = ConfigSolver(config)
 
-        with pytest.raises(ConfigSolverError):
+        with pytest.raises(ConfigSolverError, match="Hash-move ordering"):
             solver.solve()
 
     def test_move_ordering_features_require_move_ordering(self):
@@ -189,99 +175,30 @@ class TestMoveOrderingDependencies:
         ]
 
         for feature_name in features:
-            config = EngineConfig()
-            # Disable move ordering
-            config.search.use_move_ordering = False
-            # Enable the specific feature
+            config = minimal_config()
             setattr(config.search, feature_name, True)
 
             solver = ConfigSolver(config)
 
-            # Should raise some dependency error (may be LMR or the specific feature)
-            with pytest.raises(ConfigSolverError):
+            with pytest.raises(ConfigSolverError, match="requires"):
                 solver.solve()
 
-    def test_killer_moves_require_alpha_beta(self):
-        """Test that killer moves cannot be enabled without alpha-beta."""
-        config = EngineConfig()
-        config.search.use_alpha_beta = False
+    @pytest.mark.parametrize(
+        "feature_name",
+        [
+            "use_killer_moves",
+            "use_history_heuristic",
+            "use_countermove_heuristic",
+        ],
+    )
+    def test_ordering_state_features_require_cutoff_semantics(self, feature_name: str):
+        """Cutoff-trained ordering state is blocked without alpha-beta."""
+        config = minimal_config()
         config.search.use_move_ordering = True
-        config.search.use_killer_moves = True
-        config.search.use_pvs = False
-        config.search.use_aspiration_windows = False
-        config.search.use_null_move_pruning = False
-        config.search.use_futility_pruning = False
-        config.search.use_extended_futility_pruning = False
-        config.search.use_reverse_futility_pruning = False
-        config.search.use_quiescence_search = False
-        config.search.use_check_extensions = False
-        config.search.use_lmr = False
-        config.search.use_delta_pruning = False
-        config.search.use_see_pruning_in_qs = False
-        config.search.use_history_heuristic = False
-        config.search.use_countermove_heuristic = False
+        setattr(config.search, feature_name, True)
 
-        solver = ConfigSolver(config)
-        with pytest.raises(
-            ConfigSolverError,
-            match="Killer moves require alpha-beta pruning",
-        ):
-            solver.solve()
-
-    def test_history_requires_alpha_beta(self):
-        """Test that history heuristic cannot be enabled without alpha-beta."""
-        config = EngineConfig()
-        config.search.use_alpha_beta = False
-        config.search.use_move_ordering = True
-        config.search.use_history_heuristic = True
-        config.search.use_killer_moves = False
-        config.search.use_countermove_heuristic = False
-        config.search.use_pvs = False
-        config.search.use_aspiration_windows = False
-        config.search.use_null_move_pruning = False
-        config.search.use_futility_pruning = False
-        config.search.use_extended_futility_pruning = False
-        config.search.use_reverse_futility_pruning = False
-        config.search.use_quiescence_search = False
-        config.search.use_check_extensions = False
-        config.search.use_lmr = False
-        config.search.use_delta_pruning = False
-        config.search.use_see_pruning_in_qs = False
-
-        solver = ConfigSolver(config)
-        with pytest.raises(
-            ConfigSolverError,
-            match="History heuristic requires alpha-beta pruning",
-        ):
-            solver.solve()
-
-    def test_countermove_requires_alpha_beta(self):
-        """Test that countermove heuristic cannot be enabled without alpha-beta."""
-        config = EngineConfig()
-        config.search.use_alpha_beta = False
-        config.search.use_move_ordering = True
-        config.search.use_history_heuristic = True
-        config.search.use_countermove_heuristic = True
-        config.search.use_killer_moves = False
-        config.search.use_pvs = False
-        config.search.use_aspiration_windows = False
-        config.search.use_null_move_pruning = False
-        config.search.use_futility_pruning = False
-        config.search.use_extended_futility_pruning = False
-        config.search.use_reverse_futility_pruning = False
-        config.search.use_quiescence_search = False
-        config.search.use_check_extensions = False
-        config.search.use_lmr = False
-        config.search.use_delta_pruning = False
-        config.search.use_see_pruning_in_qs = False
-
-        solver = ConfigSolver(config)
-        with pytest.raises(
-            ConfigSolverError,
-            match=r"(History heuristic|Countermove heuristic) requires alpha-beta "
-            r"pruning",
-        ):
-            solver.solve()
+        with pytest.raises(ConfigSolverError, match="use_alpha_beta"):
+            ConfigSolver(config).solve()
 
 
 class TestSearchRefinementDependencies:
@@ -289,72 +206,45 @@ class TestSearchRefinementDependencies:
 
     def test_iid_requires_hash_move_ordering(self):
         """Test that IID requires hash move ordering."""
-        config = EngineConfig()
+        config = minimal_config()
         config.search.use_iid = True
-        config.search.use_hash_move_ordering = False
-        config.search.use_transposition_table = False
-        config.search.use_tt_aging = False
 
         solver = ConfigSolver(config)
 
         with pytest.raises(
             ConfigSolverError,
-            match="IID requires hash move ordering",
+            match=r"Internal iterative deepening requires.*use_hash_move_ordering",
         ):
             solver.solve()
 
-    def test_iid_requires_alpha_beta(self):
-        """Test that IID cannot be enabled without alpha-beta."""
-        config = EngineConfig()
-        config.search.use_alpha_beta = False
+    def test_iid_composes_without_alpha_beta(self):
+        """IID can seed exact TT/hash ordering in full-window minimax."""
+        config = minimal_config()
         config.search.use_iid = True
         config.search.use_hash_move_ordering = True
         config.search.use_move_ordering = True
         config.search.use_transposition_table = True
-        config.search.use_tt_aging = True
-        config.search.use_pvs = False
-        config.search.use_aspiration_windows = False
-        config.search.use_null_move_pruning = False
-        config.search.use_futility_pruning = False
-        config.search.use_extended_futility_pruning = False
-        config.search.use_reverse_futility_pruning = False
-        config.search.use_quiescence_search = False
-        config.search.use_check_extensions = False
-        config.search.use_lmr = False
-        config.search.use_delta_pruning = False
-        config.search.use_see_pruning_in_qs = False
-        config.search.use_killer_moves = False
-        config.search.use_history_heuristic = False
-        config.search.use_countermove_heuristic = False
 
-        solver = ConfigSolver(config)
-        with pytest.raises(
-            ConfigSolverError,
-            match="IID requires alpha-beta pruning",
-        ):
-            solver.solve()
+        assert ConfigSolver(config).solve().use_iid is True
 
     def test_delta_pruning_requires_quiescence_search(self):
         """Test that delta pruning requires quiescence search."""
-        config = EngineConfig()
+        config = minimal_config()
         config.search.use_delta_pruning = True
-        config.search.use_quiescence_search = False
 
         solver = ConfigSolver(config)
 
-        with pytest.raises(ConfigSolverError):
+        with pytest.raises(ConfigSolverError, match="Delta pruning"):
             solver.solve()
 
     def test_see_pruning_in_qs_requires_quiescence_search(self):
         """Test that SEE pruning in QS requires quiescence search."""
-        config = EngineConfig()
+        config = minimal_config()
         config.search.use_see_pruning_in_qs = True
-        config.search.use_quiescence_search = False
 
         solver = ConfigSolver(config)
 
-        # Will catch delta pruning error first (default True) or SEE pruning error
-        with pytest.raises(ConfigSolverError):
+        with pytest.raises(ConfigSolverError, match="SEE pruning"):
             solver.solve()
 
 
@@ -423,37 +313,21 @@ class TestDependencyChains:
 
     def test_hash_move_ordering_chain(self):
         """Test hash move ordering -> TT dependency chain."""
-        config = EngineConfig()
+        config = minimal_config()
         config.search.use_hash_move_ordering = True
         config.search.use_move_ordering = True
-        config.search.use_transposition_table = False  # Break the chain
 
         solver = ConfigSolver(config)
 
         with pytest.raises(ConfigSolverError):
             solver.solve()
 
-    def test_lmr_requires_both_dependencies(self):
-        """Test that LMR requires both alpha-beta AND move ordering."""
-        # Test missing alpha-beta
-        config1 = EngineConfig()
-        config1.search.use_lmr = True
-        config1.search.use_alpha_beta = False
-        config1.search.use_move_ordering = True
+    def test_lmr_has_no_artificial_dependency_chain(self):
+        """LMR is a depth policy, not an ordering or window dependency."""
+        config = minimal_config()
+        config.search.use_lmr = True
 
-        solver1 = ConfigSolver(config1)
-        with pytest.raises(ConfigSolverError):
-            solver1.solve()
-
-        # Test missing move ordering
-        config2 = EngineConfig()
-        config2.search.use_lmr = True
-        config2.search.use_alpha_beta = True
-        config2.search.use_move_ordering = False
-
-        solver2 = ConfigSolver(config2)
-        with pytest.raises(ConfigSolverError):
-            solver2.solve()
+        assert ConfigSolver(config).solve().use_lmr is True
 
 
 class TestSolverBehavior:
@@ -508,11 +382,10 @@ class TestSolverBehavior:
 
     def test_invalid_modification_is_caught(self):
         """Test that creating invalid config after solver init is caught."""
-        config = EngineConfig()
+        config = minimal_config()
         solver = ConfigSolver(config)
 
         # Create invalid dependency after solver creation
-        config.search.use_transposition_table = False
         config.search.use_tt_aging = True
 
         with pytest.raises(ConfigSolverError):

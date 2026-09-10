@@ -11,7 +11,7 @@ from engine.evaluators import EvaluatorFactory
 from engine.search.minimax import Minimax
 
 if TYPE_CHECKING:
-    from engine.config import EngineConfig
+    from engine.config import EngineConfig, ResolvedEngineConfig
     from engine.evaluators import Evaluator
     from engine.search.stats import SearchStats
 
@@ -89,7 +89,9 @@ class CoreBoardAdapter(CoreAdapter):
 class SearchAdapter(Protocol):
     """Protocol for the search engine."""
 
-    def search(self, depth: int) -> tuple[float | None, str | None]:
+    def search(
+        self, depth: int, max_time: float | None = None
+    ) -> tuple[float | None, str | None]:
         """Search for the best move at the given depth."""
         ...
 
@@ -114,9 +116,11 @@ class PythonSearchAdapter(SearchAdapter):
         """
         self.engine = engine
 
-    def search(self, depth: int) -> tuple[float | None, str | None]:
+    def search(
+        self, depth: int, max_time: float | None = None
+    ) -> tuple[float | None, str | None]:
         """Search for the best move at the given depth."""
-        score, move = self.engine.find_best_move(depth)
+        score, move = self.engine.find_best_move(depth, max_time=max_time)
         return score, move.uci() if move else None
 
     def get_stats(self) -> SearchStats:
@@ -135,7 +139,7 @@ class EngineRuntime:
     board: CoreAdapter
     searcher: SearchAdapter
     evaluator: Evaluator | None  # Optional for C++ search if it has internal eval
-    config: EngineConfig
+    config: ResolvedEngineConfig
 
 
 class Engine:
@@ -149,7 +153,7 @@ class Engine:
         board: core.Board,
         evaluator: Evaluator,
         searcher: Minimax,
-        config: EngineConfig,
+        config: ResolvedEngineConfig,
     ):
         """Initialize the engine runtime with all core components.
 
@@ -180,25 +184,29 @@ class Engine:
     def find_best_move(
         self,
         depth: int | None = None,
+        max_time: float | None = None,
     ) -> tuple[float | None, core.Move | None]:
         """Search for the best move up to the given depth.
 
         Uses the config depth when depth is not specified.
         """
         search_depth = depth if depth is not None else self.config.search_depth
-        return self.searcher.find_best_move(search_depth)
+        return self.searcher.find_best_move(search_depth, max_time=max_time)
 
-    def search(self, depth: int | None = None) -> tuple[float | None, str | None]:
+    def search(
+        self, depth: int | None = None, max_time: float | None = None
+    ) -> tuple[float | None, str | None]:
         """Search for the best move and return score and UCI move.
 
         Args:
             depth: Search depth (uses config default if None).
+            max_time: Optional time limit for this search only.
 
         Returns:
             Tuple of (score, uci_move) or (None, None) if no move found.
 
         """
-        score, move = self.find_best_move(depth)
+        score, move = self.find_best_move(depth, max_time=max_time)
         return score, move.uci() if move else None
 
     @property
@@ -209,6 +217,11 @@ class Engine:
     def reset(self) -> None:
         """Reset search state, clearing history and TT."""
         self.searcher.reset_state()
+
+    @property
+    def effective_config(self) -> ResolvedEngineConfig:
+        """Return the immutable configuration installed in the runtime."""
+        return self.config
 
 
 def create_core_adapter(config: EngineConfig, fen: str | None = None) -> CoreAdapter:
@@ -240,12 +253,12 @@ def create_engine(config: EngineConfig, fen: str | None = None) -> Engine:
         An initialized Engine instance ready for search operations.
 
     """
-    ConfigSolver(config).solve()
+    resolved = ConfigSolver(config).resolve()
 
     board = core.Board.from_fen(fen) if fen else core.Board.from_fen(STARTING_FEN)
-    evaluator = EvaluatorFactory.create(config.evaluation)
-    searcher = Minimax(board, evaluator, config)
-    return Engine(board=board, evaluator=evaluator, searcher=searcher, config=config)
+    evaluator = EvaluatorFactory.create(resolved.evaluation)
+    searcher = Minimax(board, evaluator, resolved)
+    return Engine(board=board, evaluator=evaluator, searcher=searcher, config=resolved)
 
 
 def create_search_adapter(
@@ -264,14 +277,14 @@ def create_search_adapter(
         ValueError: If the core_adapter is not a CoreBoardAdapter.
 
     """
-    ConfigSolver(config).solve()
+    resolved = ConfigSolver(config).resolve()
 
     if not isinstance(core_adapter, CoreBoardAdapter):
         raise ValueError("Search requires Core backend board.")
 
     board = core_adapter.get_internal_board()
-    evaluator = EvaluatorFactory.create(config.evaluation)
-    engine = Minimax(board, evaluator, config)
+    evaluator = EvaluatorFactory.create(resolved.evaluation)
+    engine = Minimax(board, evaluator, resolved)
     return PythonSearchAdapter(engine)
 
 
@@ -299,5 +312,8 @@ def create_engine_runtime(
         evaluator = search_adapter.engine.evaluator
 
     return EngineRuntime(
-        board=board_adapter, searcher=search_adapter, evaluator=evaluator, config=config
+        board=board_adapter,
+        searcher=search_adapter,
+        evaluator=evaluator,
+        config=engine.config,
     )
