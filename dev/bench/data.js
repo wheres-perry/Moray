@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785911414258,
+  "lastUpdate": 1790014053255,
   "repoUrl": "https://github.com/wheres-perry/Moray",
   "entries": {
     "Benchmark": [
@@ -1296,6 +1296,114 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00022265121970163623",
             "extra": "mean: 27.105386054055824 msec\nrounds: 37"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "86326912+wheres-perry@users.noreply.github.com",
+            "name": "Ethan Perry",
+            "username": "wheres-perry"
+          },
+          "committer": {
+            "email": "86326912+wheres-perry@users.noreply.github.com",
+            "name": "Ethan Perry",
+            "username": "wheres-perry"
+          },
+          "distinct": true,
+          "id": "3d75498181b3f6f5eca3f9771e345a885c99900c",
+          "message": "feat(eval): integrate Stockfish NNUE and Custom Latent Threats evaluators\n\n- Implement StockfishNNUEEvaluator (SFNNv16 88,944 inputs) and NNUEEvaluator (101,232 inputs with Latent Threats)\n- Wire EvalBackend enum into EvaluationConfig, ConfigSolver, and EvaluatorFactory\n- Add comprehensive test suites with numerical parity benchmarks, feature extractors, and LEB128 decoding\n- Add head-to-head match runner and Stockfish 18 Elo estimation CLI support\n- Update linting, formatting, type hints, and CI gates for PyTorch/NNUE",
+          "timestamp": "2026-09-21T11:58:22-06:00",
+          "tree_id": "6f4b9e166dfbb87d73643a3f1f9a614fc1069e6b",
+          "url": "https://github.com/wheres-perry/Moray/commit/3d75498181b3f6f5eca3f9771e345a885c99900c"
+        },
+        "date": 1790014052245,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_performance.py::test_full_game_cycle_300_ply",
+            "value": 0.0011741649008864842,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000045513821440566646",
+            "extra": "mean: 851.6691303282945 sec\nrounds: 4069"
+          },
+          {
+            "name": "tests/benchmarks/test_performance.py::test_perft_traversal_depth_3",
+            "value": 0.0000037574127873393897,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00012950318681890182",
+            "extra": "mean: 266140.57507056504 sec\nrounds: 5"
+          },
+          {
+            "name": "tests/benchmarks/test_performance.py::test_perft_traversal_depth_5",
+            "value": 7.36583856126281e-8,
+            "unit": "iter/sec",
+            "range": "stddev: 0.016007878139011233",
+            "extra": "mean: 13576186.76655545 sec\nrounds: 3"
+          },
+          {
+            "name": "tests/benchmarks/test_performance.py::test_search_node_expansion_loop",
+            "value": 0.00003765353200075617,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00014319272528721749",
+            "extra": "mean: 26557.93352878337 sec\nrounds: 169"
+          },
+          {
+            "name": "tests/benchmarks/test_performance.py::test_promotion_heavy_movegen",
+            "value": 0.0474271542013107,
+            "unit": "iter/sec",
+            "range": "stddev: 6.334094055450785e-7",
+            "extra": "mean: 21.084967395584613 sec\nrounds: 10"
+          },
+          {
+            "name": "tests/benchmarks/test_performance.py::test_castling_and_ep_movegen",
+            "value": 0.030057921064885296,
+            "unit": "iter/sec",
+            "range": "stddev: 1.2831657935320144e-7",
+            "extra": "mean: 33.26910060883201 sec\nrounds: 10"
+          },
+          {
+            "name": "tests/benchmarks/test_performance.py::test_bulk_push_pop_precomputed",
+            "value": 0.031606771331114364,
+            "unit": "iter/sec",
+            "range": "stddev: 1.904672066912972e-7",
+            "extra": "mean: 31.638789977120485 sec\nrounds: 10"
+          },
+          {
+            "name": "tests/benchmarks/test_performance.py::test_bulk_instantiation_1000",
+            "value": 0.00030828125485654313,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002517613513920487",
+            "extra": "mean: 3243.7911298413005 sec\nrounds: 1371"
+          },
+          {
+            "name": "tests/benchmarks/test_performance.py::test_single_move_toggle_50k",
+            "value": 0.000012312017298221073,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00010306017778749362",
+            "extra": "mean: 81221.45833441016 sec\nrounds: 56"
+          },
+          {
+            "name": "tests/benchmarks/test_performance.py::test_copy_chain_stress",
+            "value": 0.0009168662925875445,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000008185777365991204",
+            "extra": "mean: 1090.6715712907699 sec\nrounds: 4045"
+          },
+          {
+            "name": "tests/benchmarks/test_performance.py::test_batch_legal_generation",
+            "value": 0.00006506457286446605,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000027136718244760714",
+            "extra": "mean: 15369.347034415616 sec\nrounds: 291"
+          },
+          {
+            "name": "tests/benchmarks/test_search_metrics.py::test_search_metrics_full_suite",
+            "value": 0.000012781891981057008,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00008117409956861924",
+            "extra": "mean: 78235.6791531346 sec\nrounds: 57"
           }
         ]
       }
