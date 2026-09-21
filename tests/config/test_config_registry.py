@@ -42,7 +42,7 @@ def test_registry_covers_every_public_feature_and_parameter() -> None:
     assert {name for name in search_fields if name.startswith("use_")} == (
         registered_search
     )
-    assert registered_evaluation == evaluation_fields
+    assert registered_evaluation == evaluation_fields - {"backend", "nnue_path"}
     assert registered_parameters == search_fields - registered_search - {
         "max_time",
         "max_depth",

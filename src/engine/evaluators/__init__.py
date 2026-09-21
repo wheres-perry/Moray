@@ -21,13 +21,22 @@ from engine.evaluators.factory import (
     MockEvaluator,
     SimpleEvaluator,
 )
+from engine.evaluators.nnue import CustomNNUEEvaluator, NNUEEvaluator
+from engine.evaluators.nnue_stockfish import (
+    StockfishNNUEEvaluator,
+    extract_sfnnv16_features,
+)
 
 __all__ = [
     "CompositeEvaluator",
+    "CustomNNUEEvaluator",
     "EvalComponent",
     "Evaluator",
     "EvaluatorFactory",
     "MockEvaluator",
+    "NNUEEvaluator",
     "SimpleEvaluator",
+    "StockfishNNUEEvaluator",
     "compute_game_phase",
+    "extract_sfnnv16_features",
 ]

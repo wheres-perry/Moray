@@ -33,7 +33,7 @@ def _run_anchor_perft(board: Any, depth: int) -> int:
 
 
 def measure_chess_anchor_nps() -> float:
-    """Measure host machine's native chess NPS using an immutable C++ perft(4) anchor."""
+    """Measure native chess NPS using an immutable C++ perft(4) anchor."""
     adapter = create_core_adapter(_KIWIPETE_FEN)
     board = adapter.board
 
@@ -48,7 +48,7 @@ def measure_chess_anchor_nps() -> float:
 
 
 def normalize_benchmark_json(json_path: str | Path) -> None:
-    """Post-process output.json to normalize mean, median, and ops against the chess anchor NPS."""
+    """Post-process output.json to normalize metrics against chess anchor NPS."""
     path = Path(json_path)
     if not path.exists():
         return

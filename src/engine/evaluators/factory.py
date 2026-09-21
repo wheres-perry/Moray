@@ -17,6 +17,8 @@ from engine.evaluators.components import (
     PawnStructureComponent,
     PSTComponent,
 )
+from engine.evaluators.nnue import NNUEEvaluator
+from engine.evaluators.nnue_stockfish import StockfishNNUEEvaluator
 
 if TYPE_CHECKING:
     from engine.config import EvaluationConfig, ResolvedEvaluationConfig
@@ -72,6 +74,20 @@ class EvaluatorFactory:
         appended only when its flag is ``True``.  When ``game_stage_conscious``
         is set, every phase-aware component is constructed with ``gsc=True``.
         """
+        backend = getattr(config, "backend", "handcrafted")
+        if isinstance(backend, str):
+            backend_val = backend.lower()
+        else:
+            backend_val = getattr(backend, "value", str(backend)).lower()
+
+        if backend_val in ("nnue_custom", "custom_nnue"):
+            net_path = getattr(config, "nnue_path", None) or "latent_threats.nnue"
+            return NNUEEvaluator(net_path=net_path)
+
+        if backend_val == "nnue_stockfish":
+            net_path = getattr(config, "nnue_path", None) or "models/stockfish.nnue"
+            return StockfishNNUEEvaluator(net_path=net_path)
+
         gsc = config.game_stage_conscious
         composite = CompositeEvaluator()
         composite.add_component(MaterialComponent())

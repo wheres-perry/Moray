@@ -3,7 +3,7 @@
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +102,14 @@ class SearchConfig:
     use_tt_aging: bool = True
 
 
+class EvalBackend(StrEnum):
+    """Whole-score mechanism for board evaluation."""
+
+    HANDCRAFTED = "handcrafted"
+    NNUE_STOCKFISH = "nnue_stockfish"
+    NNUE_CUSTOM = "nnue_custom"
+
+
 @dataclass
 class EvaluationConfig:
     """Configuration for the static board evaluation.
@@ -118,9 +126,13 @@ class EvaluationConfig:
     use_mobility: bool = True
     use_king_safety: bool = True
     game_stage_conscious: bool = True
+    backend: EvalBackend = EvalBackend.HANDCRAFTED
+    nnue_path: str | None = None
 
     def __post_init__(self) -> None:
         """Defer dependency validation to the canonical configuration solver."""
+        if isinstance(self.backend, str):
+            self.backend = EvalBackend(self.backend)
 
 
 @dataclass
@@ -235,6 +247,9 @@ class EngineConfig:
 
         """
         e = self.evaluation
+        if e.backend != EvalBackend.HANDCRAFTED:
+            return f"Eval: [{e.backend.value}]"
+
         parts: list[str] = []
         if e.use_pst:
             parts.append("PST")
@@ -317,6 +332,8 @@ class ResolvedEvaluationConfig:
     use_mobility: bool
     use_king_safety: bool
     game_stage_conscious: bool
+    backend: EvalBackend = EvalBackend.HANDCRAFTED
+    nnue_path: str | None = None
 
     @classmethod
     def from_config(cls, config: EvaluationConfig) -> "ResolvedEvaluationConfig":

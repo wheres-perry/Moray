@@ -8,8 +8,11 @@
 data/syzygy/
 data/interim/
 data/models/
+*.nnue
 .docker-cache
-validation/
+nnue-pytorch/
+models/
+build/
 
 # ── CMake / scikit-build-core (in-place editable build artifacts) ────
 CMakeCache.txt

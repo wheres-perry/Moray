@@ -28,30 +28,36 @@
 ```python
 class EvalBackend(Enum):
     """Whole-score mechanism. Deliberately minimal."""
-    HANDCRAFTED = "handcrafted"          # composite of orthogonal terms
-    NNUE_STOCKFISH = "nnue_stockfish"    # CC0 Stockfish-format net, own inference
-    NNUE_CUSTOM = "nnue_custom"          # RESERVED — not scheduled
+
+    HANDCRAFTED = "handcrafted"  # composite of orthogonal terms
+    NNUE_STOCKFISH = "nnue_stockfish"  # CC0 Stockfish-format net, own inference
+    NNUE_CUSTOM = "nnue_custom"  # RESERVED — not scheduled
 
 
 class MaterialMode(Enum):
     """How the material term is scored — orthogonal to everything else."""
-    VALUES = "values"                    # piece_values (int or (mg, eg))
-    COUNT = "count"                      # material_count_weight x piece-count diff
-    RANDOM = "random"                    # seeded random per piece
+
+    VALUES = "values"  # piece_values (int or (mg, eg))
+    COUNT = "count"  # material_count_weight x piece-count diff
+    RANDOM = "random"  # seeded random per piece
 
 
 class PhaseMode(Enum):
     """Whether terms carrying mg/eg data are interpolated."""
-    NONE = "none"                        # use mg (or single) values only
-    INTERPOLATE = "interpolate"          # mg/eg blend by game phase
+
+    NONE = "none"  # use mg (or single) values only
+    INTERPOLATE = "interpolate"  # mg/eg blend by game phase
 
 
 class PSTSource(Enum):
     """Origin/family of a bundled table set — metadata, not the selector."""
-    HANDCRAFTED = "handcrafted"                  # hand-tuned in-repo
-    SANE = "sane"                                # hand-tuned "sane" values
-    PESTO = "pesto"                              # permissive third-party tables
-    STOCKFISH_DISTILLED = "stockfish_distilled"  # fitted to SF evals, distilled out-of-tree
+
+    HANDCRAFTED = "handcrafted"  # hand-tuned in-repo
+    SANE = "sane"  # hand-tuned "sane" values
+    PESTO = "pesto"  # permissive third-party tables
+    STOCKFISH_DISTILLED = (
+        "stockfish_distilled"  # fitted to SF evals, distilled out-of-tree
+    )
 ```
 
 ### 2.2 PST table registry
@@ -274,7 +280,7 @@ single int or an `(mg, eg)` pair, so material can itself be tapered.
 ```python
 piece_values = {"pawn": 100, "knight": 320, "bishop": 330, "rook": 500, "queen": 900}
 piece_values = {"queen": (950, 1050), "pawn": (100, 140)}  # tapered material
-piece_values = {"queen": 1, "pawn": 10}                     # odd but valid
+piece_values = {"queen": 1, "pawn": 10}  # odd but valid
 ```
 
 ## 5. NNUE backend (`nnue_stockfish`)

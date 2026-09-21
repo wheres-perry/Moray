@@ -144,7 +144,10 @@ def benchmarks(session: Session) -> None:
     session.run(
         "python",
         "-c",
-        "from tests.benchmarks.anchor import normalize_benchmark_json; normalize_benchmark_json('output.json')",
+        (
+            "from tests.benchmarks.anchor import normalize_benchmark_json; "
+            "normalize_benchmark_json('output.json')"
+        ),
     )
 
 

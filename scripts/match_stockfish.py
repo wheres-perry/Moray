@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import chess
 import chess.engine
 
-from engine.config import EngineConfig
+from engine.config import EngineConfig, EvalBackend
 from engine.factory import create_engine
 
 STOCKFISH_PATH = "/opt/homebrew/bin/stockfish"
@@ -92,10 +92,12 @@ def play_game(
     return 0.5, max_plies, "max_plies"
 
 
-def run_benchmark_suite(
+def run_benchmark_suite(  # noqa: C901, PLR0912
     target_elo: int = 1700,
     num_pairs: int = 30,
     moray_depth: int = 5,
+    backend: str = "handcrafted",
+    nnue_path: str | None = None,
 ) -> None:
     """Run benchmark match against Stockfish 18 at a specific UCI_Elo setting."""
     print("\n============================================================")
@@ -104,6 +106,9 @@ def run_benchmark_suite(
 
     moray_config = EngineConfig()
     moray_config.search_depth = moray_depth
+    moray_config.evaluation.backend = EvalBackend(backend)
+    if nnue_path:
+        moray_config.evaluation.nnue_path = nnue_path
     moray = create_engine(moray_config)
 
     rng = random.Random(1337 + target_elo)
@@ -228,8 +233,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--depth", type=int, default=5, help="Moray search depth (default: 5)"
     )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="handcrafted",
+        choices=["handcrafted", "nnue_stockfish", "nnue_custom"],
+        help="Evaluation backend to benchmark",
+    )
+    parser.add_argument(
+        "--nnue-path",
+        type=str,
+        default=None,
+        help="Path to NNUE weights file",
+    )
 
     args = parser.parse_args()
     run_benchmark_suite(
-        target_elo=args.elo, num_pairs=args.pairs, moray_depth=args.depth
+        target_elo=args.elo,
+        num_pairs=args.pairs,
+        moray_depth=args.depth,
+        backend=args.backend,
+        nnue_path=args.nnue_path,
     )
